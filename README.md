@@ -6,37 +6,96 @@ Built with [🦞🐚 Carapace](https://github.com/JeffSteinbok/carapace-plugin-s
 
 ## Setup
 
-### 1. Register an Azure AD App
+### Choosing an auth mechanism
 
-1. Go to the [Azure Portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
-2. Click **New registration**
-3. Fill in:
-   - **Name:** anything (e.g. `OpenClaw Outlook`)
-   - **Supported account types:** select **Personal Microsoft accounts only** (for personal Outlook/Hotmail/Live accounts) — or **Accounts in any organizational directory and personal Microsoft accounts** if you need both work and personal
-   - **Redirect URI:** choose **Public client/native (mobile & desktop)** and enter `http://localhost`
-4. Click **Register**
-5. Copy the **Application (client) ID** — this is your `OUTLOOK_CLIENT_ID`
+This plugin authenticates to Microsoft Graph with a refresh token. There are two
+ways to obtain that token, and the plugin supports **both**. Pick one before you
+start — the Azure app registration and the token you mint differ slightly.
 
-### 2. Create a Client Secret
+| | **Public client + PKCE** (recommended) | **Confidential client + secret** |
+|---|---|---|
+| Client secret | **None** | Required (`OUTLOOK_CLIENT_SECRET`) |
+| Azure setup | "Allow public client flows" = Yes; `http://localhost` as a *Mobile & desktop* redirect | Client secret created under *Certificates & secrets* |
+| How you get the token | `npm run login` (browser PKCE flow) | Manual auth-code + `curl` exchange |
+| Best for | Local / desktop / CLI installs (openclaw on your own machine) | Server-side apps that can genuinely keep a secret hidden |
+| **Pros** | Nothing sensitive stored on the box; matches Microsoft's guidance for native/desktop/CLI apps; a leaked config can't be replayed without the user re-consenting; no secret to rotate or expire | Familiar, widely-documented flow; the secret + refresh token together are a stable long-lived credential |
+| **Cons** | The MSA refresh token still rotates/expires (~90 days idle) — re-run `npm run login` to refresh; requires the public-client toggle on the app | A client secret on a local machine adds **no real security** (a public client can't hide it) yet is another credential to store, leak, and rotate; secrets have hard expiry dates and silently break the plugin when they lapse |
 
-1. In your app registration, go to **Certificates & secrets → Client secrets**
-2. Click **New client secret**, give it a description and expiry
-3. Copy the **Value** immediately (it won't be shown again) — this is your `OUTLOOK_CLIENT_SECRET`
+> **TL;DR:** For an openclaw instance running on your own machine, use **public
+> client + PKCE**. A client secret only makes sense when the plugin runs somewhere
+> that can actually keep the secret confidential (a locked-down server), which is
+> rarely the case for a personal install.
 
-### 3. Configure API Permissions
+---
 
-1. Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions**
-2. Add all of the following:
-   - `Calendars.ReadWrite` — read and write calendar events
-   - `Mail.ReadWrite` — read, move, flag, and manage mail
-   - `Mail.Send` — send email
-   - `Tasks.ReadWrite` — create and manage Microsoft To Do tasks
-   - `offline_access` — required to get a refresh token
-3. Click **Grant admin consent** if prompted (for work accounts); personal accounts consent at auth time
+### Option A — Public client + PKCE (recommended, no secret)
 
-### 4. Get a Refresh Token (OAuth Flow)
+#### 1. Register (or configure) the Azure app
 
-Run the following to generate the authorization URL (replace `YOUR_CLIENT_ID`):
+1. Go to the [Azure Portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) and open (or create) your app.
+2. **Supported account types:** *Personal Microsoft accounts only* (or *any org directory + personal* if you also need work accounts).
+3. **Authentication → Add a platform → Mobile and desktop applications**, add redirect URI `http://localhost`.
+4. **Authentication → Advanced settings → Allow public client flows → Yes.**
+5. Copy the **Application (client) ID** — this is your `OUTLOOK_CLIENT_ID`. You do **not** need a client secret.
+
+#### 2. Configure API permissions
+
+**API permissions → Add a permission → Microsoft Graph → Delegated permissions**, then add:
+
+- `Calendars.ReadWrite` — read and write calendar events
+- `Mail.ReadWrite` — read, move, flag, and manage mail
+- `Mail.Send` — send email
+- `Tasks.ReadWrite` — create and manage Microsoft To Do tasks
+- `offline_access` — required to get a refresh token
+
+Personal accounts consent at sign-in time; no admin consent needed.
+
+#### 3. Mint a refresh token
+
+From the plugin directory:
+
+```bash
+OUTLOOK_CLIENT_ID=your-app-client-id npm run login
+```
+
+This opens your browser, runs the Authorization Code + PKCE flow against a
+loopback redirect (`http://localhost:53682` by default — override with
+`--port`), and prints the `OUTLOOK_REFRESH_TOKEN` to set. No secret is involved
+at any point.
+
+#### 4. Set environment variables
+
+```bash
+OUTLOOK_CLIENT_ID=your-app-client-id
+OUTLOOK_REFRESH_TOKEN=your-refresh-token
+# no OUTLOOK_CLIENT_SECRET
+```
+
+---
+
+### Option B — Confidential client + secret
+
+#### 1. Register the Azure app
+
+1. In [App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), click **New registration**.
+2. **Name:** anything (e.g. `carapace-outlook`).
+3. **Supported account types:** *Personal Microsoft accounts only* (or *any org directory + personal*).
+4. **Redirect URI:** *Web* → `http://localhost`.
+5. Copy the **Application (client) ID** — `OUTLOOK_CLIENT_ID`.
+
+#### 2. Create a client secret
+
+**Certificates & secrets → Client secrets → New client secret**, then copy the
+**Value** immediately (shown once) — this is your `OUTLOOK_CLIENT_SECRET`.
+
+#### 3. Configure API permissions
+
+Same delegated permissions as Option A (`Calendars.ReadWrite`, `Mail.ReadWrite`,
+`Mail.Send`, `Tasks.ReadWrite`, `offline_access`).
+
+#### 4. Get a refresh token (manual OAuth flow)
+
+Generate the authorization URL (replace `YOUR_CLIENT_ID`):
 
 ```
 https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
@@ -49,10 +108,9 @@ https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
 
 > **Note:** Use `/consumers/` for personal Microsoft accounts. Use `/common/` only if your app registration is set to **All** audience.
 
-1. Open the URL in your browser
-2. Sign in and accept the permissions
-3. You'll be redirected to `http://localhost/?code=...` — copy the `code` value
-4. Exchange it for tokens:
+1. Open the URL, sign in, and accept the permissions.
+2. You'll be redirected to `http://localhost/?code=...` — copy the `code`.
+3. Exchange it for tokens:
 
 ```bash
 curl -X POST https://login.microsoftonline.com/consumers/oauth2/v2.0/token \
@@ -64,11 +122,9 @@ curl -X POST https://login.microsoftonline.com/consumers/oauth2/v2.0/token \
   -d "grant_type=authorization_code"
 ```
 
-5. Copy the `refresh_token` from the response — this is your `OUTLOOK_REFRESH_TOKEN`
+4. Copy the `refresh_token` — this is your `OUTLOOK_REFRESH_TOKEN`.
 
-> **Important:** The refresh token is long-lived but scoped. If you need to add permissions later, you must repeat this OAuth flow — updating only the token without re-consenting will not grant new scopes.
-
-### 5. Set Environment Variables
+#### 5. Set environment variables
 
 ```bash
 OUTLOOK_CLIENT_ID=your-app-client-id
@@ -76,7 +132,33 @@ OUTLOOK_CLIENT_SECRET=your-client-secret
 OUTLOOK_REFRESH_TOKEN=your-refresh-token
 ```
 
-### 6. Configure the Plugin
+> **Important (both options):** The refresh token is long-lived but scoped. If
+> you add permissions later, you must repeat the flow — updating only the token
+> without re-consenting will not grant new scopes.
+
+---
+
+### Configure the Plugin
+
+**Public client (Option A):**
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "outlook": {
+        "enabled": true,
+        "config": {
+          "clientId": "${OUTLOOK_CLIENT_ID}",
+          "refreshToken": "${OUTLOOK_REFRESH_TOKEN}"
+        }
+      }
+    }
+  }
+}
+```
+
+**Confidential client (Option B)** — add `clientSecret`:
 
 ```json
 {
@@ -95,7 +177,7 @@ OUTLOOK_REFRESH_TOKEN=your-refresh-token
 }
 ```
 
-Credentials can be passed directly in config or via environment variables — env vars are the recommended approach.
+Credentials can be passed directly in config or via environment variables — env vars are the recommended approach. When `clientSecret` is omitted, the plugin uses the public-client token flow automatically.
 
 ---
 
@@ -104,7 +186,7 @@ Credentials can be passed directly in config or via environment variables — en
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `clientId` | string | Yes | Azure app client ID |
-| `clientSecret` | string | Yes | Azure app client secret |
+| `clientSecret` | string | No | Azure app client secret. Omit for public-client (PKCE) apps; provide only for confidential-client registrations |
 | `refreshToken` | string | Yes | OAuth refresh token with mail + calendar + task scopes |
 | `personalCalendarNames` | string[] | No | Additional calendar names to treat as personal (default: `["Calendar", "calendar"]`) |
 | `familyCalendarNames` | string[] | No | Additional calendar names to treat as family (default: `["Your Family", "Family"]`) |

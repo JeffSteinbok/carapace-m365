@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsup && carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin",
+    "login": "node scripts/login.mjs",
     "test": "vitest run"
   },
   "devDependencies": {

@@ -103,13 +103,16 @@ function httpPostJson(
 // ---------------------------------------------------------------------------
 
 async function getAccessToken(clientId: string, clientSecret: string, refreshToken: string): Promise<string> {
-  const body = new URLSearchParams({
+  const params: Record<string, string> = {
     client_id: clientId,
-    client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: "refresh_token",
     scope: "Calendars.ReadWrite Mail.ReadWrite Mail.Send Tasks.ReadWrite offline_access",
-  }).toString();
+  };
+  // Public-client (PKCE) registrations have no secret; only send it when present
+  // so the same code path serves both confidential and public clients.
+  if (clientSecret) params.client_secret = clientSecret;
+  const body = new URLSearchParams(params).toString();
   const res = await httpPost(TOKEN_URL, body, { "Content-Type": "application/x-www-form-urlencoded" });
   const parsed = JSON.parse(res);
   if (parsed.error) throw new Error(`Token error: ${parsed.error_description ?? parsed.error}`);
@@ -330,8 +333,8 @@ export async function fetchCalendar(
   params: { calendar?: string; days?: number },
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   const calendar = params.calendar ?? "all";
   const days = params.days ?? 7;
@@ -372,8 +375,8 @@ export async function createEvent(
   params: CreateEventParams,
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   if (!params.subject) return { error: "subject is required" };
   if (!params.start) return { error: "start is required" };
@@ -451,8 +454,8 @@ export async function updateEvent(
   params: UpdateEventParams,
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   if (!params.event_id) return { error: "event_id is required" };
 
@@ -529,8 +532,8 @@ export async function deleteEvent(
   params: DeleteEventParams,
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   if (!params.event_id) return { error: "event_id is required" };
 
@@ -566,8 +569,8 @@ export async function createMeeting(
   params: CreateMeetingParams,
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   const token = await getAccessToken(clientId, clientSecret, refreshToken);
   const tz = params.timezone ?? "America/Los_Angeles";
@@ -628,8 +631,8 @@ export async function queryEvents(
   params: QueryEventsParams,
 ): Promise<unknown> {
   const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!clientId || !refreshToken) {
+    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
   }
   const token = await getAccessToken(clientId, clientSecret, refreshToken);
 

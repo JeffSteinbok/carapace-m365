@@ -20,13 +20,19 @@ import {
   forwardMessage,
   moveMessage,
   flagMessage,
+  listTaskListsHandler,
+  listTasks,
+  createTask,
+  updateTask,
+  completeTask,
+  deleteTask,
   type OutlookCalendarConfig,
 } from "./handlers.js";
 
 export const createEntry = definePlugin({
   id: "outlook",
   name: "Outlook",
-  description: "Mail and calendar tools for Outlook via Microsoft Graph",
+  description: "Mail, calendar, and task tools for Outlook via Microsoft Graph",
 
   configSchema: Type.Object({
     clientId: Type.Optional(Type.String({ description: "Microsoft OAuth client ID" })),
@@ -207,6 +213,120 @@ export const createEntry = definePlugin({
       async execute(params, config) {
         try {
           return await flagMessage(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    // -------------------------------------------------------------------------
+    // Tasks tools
+    // -------------------------------------------------------------------------
+
+    tool({
+      name: "outlook_task_lists",
+      label: "Outlook Task Lists",
+      description: "List Microsoft To Do / Outlook task lists available on the account.",
+      parameters: Type.Object({}),
+      async execute(_, config) {
+        try {
+          return await listTaskListsHandler(resolveConfig(config));
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_tasks",
+      label: "Outlook Tasks",
+      description: "List tasks from a Microsoft To Do list.",
+      parameters: Type.Object({
+        task_list: Type.Optional(Type.String({ description: "Task list name or list ID. Defaults to the Tasks/To Do list if found." })),
+        include_completed: Type.Optional(Type.Boolean({ description: "Include completed tasks (default: false)." })),
+        limit: Type.Optional(Type.Integer({ description: "Maximum number of tasks to return (default 20)." })),
+      }),
+      async execute({ task_list, include_completed, limit }, config) {
+        try {
+          return await listTasks(resolveConfig(config), { task_list, include_completed, limit });
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_create_task",
+      label: "Outlook Create Task",
+      description: "Create a Microsoft To Do task, optionally with due/reminder dates.",
+      parameters: Type.Object({
+        title: Type.String({ description: "Task title." }),
+        task_list: Type.Optional(Type.String({ description: "Task list name or list ID. Defaults to the Tasks/To Do list if found." })),
+        due: Type.Optional(Type.String({ description: "Due datetime in ISO format." })),
+        reminder: Type.Optional(Type.String({ description: "Reminder datetime in ISO format." })),
+        notes: Type.Optional(Type.String({ description: "Task notes or body text." })),
+        importance: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")], { description: "Task importance." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await createTask(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_update_task",
+      label: "Outlook Update Task",
+      description: "Update an existing Microsoft To Do task.",
+      parameters: Type.Object({
+        task_id: Type.String({ description: "Task ID to update." }),
+        task_list: Type.Optional(Type.String({ description: "Task list name or list ID." })),
+        title: Type.Optional(Type.String({ description: "New task title." })),
+        due: Type.Optional(Type.String({ description: "New due datetime in ISO format. Set empty string to clear." })),
+        reminder: Type.Optional(Type.String({ description: "New reminder datetime in ISO format. Set empty string to clear." })),
+        notes: Type.Optional(Type.String({ description: "New notes/body text." })),
+        importance: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")], { description: "Task importance." })),
+        status: Type.Optional(Type.Union([Type.Literal("notStarted"), Type.Literal("inProgress"), Type.Literal("completed")], { description: "Task status." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await updateTask(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_complete_task",
+      label: "Outlook Complete Task",
+      description: "Mark a Microsoft To Do task as completed.",
+      parameters: Type.Object({
+        task_id: Type.String({ description: "Task ID to complete." }),
+        task_list: Type.Optional(Type.String({ description: "Task list name or list ID." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await completeTask(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_delete_task",
+      label: "Outlook Delete Task",
+      description: "Delete a Microsoft To Do task.",
+      parameters: Type.Object({
+        task_id: Type.String({ description: "Task ID to delete." }),
+        task_list: Type.Optional(Type.String({ description: "Task list name or list ID." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await deleteTask(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
         }

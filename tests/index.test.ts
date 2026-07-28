@@ -55,6 +55,37 @@ const EVENTS = JSON.stringify({
     body: { contentType: "html", content: "<div>Agenda item</div>" },
   }],
 });
+const TASK_LISTS = JSON.stringify({
+  value: [
+    { id: "list-1", displayName: "Tasks", isDefault: true },
+    { id: "list-2", displayName: "Work" },
+  ],
+});
+const TASKS = JSON.stringify({
+  value: [
+    {
+      id: "task-1",
+      title: "Pay rent",
+      status: "notStarted",
+      importance: "normal",
+      createdDateTime: "2026-05-02T08:00:00Z",
+      lastModifiedDateTime: "2026-05-02T08:05:00Z",
+      dueDateTime: { dateTime: "2026-05-03T00:00:00", timeZone: "America/Los_Angeles" },
+      reminderDateTime: { dateTime: "2026-05-02T16:00:00", timeZone: "America/Los_Angeles" },
+      body: { contentType: "text", content: "May rent" },
+    },
+  ],
+});
+const TASK_CREATED = JSON.stringify({
+  id: "task-new",
+  title: "Buy milk",
+  status: "notStarted",
+  importance: "high",
+  createdDateTime: "2026-05-02T08:10:00Z",
+  lastModifiedDateTime: "2026-05-02T08:10:00Z",
+  dueDateTime: { dateTime: "2026-05-03T00:00:00", timeZone: "America/Los_Angeles" },
+  body: { contentType: "text", content: "Whole milk" },
+});
 
 beforeEach(() => {
   process.env.OUTLOOK_CLIENT_ID = "cid";
@@ -73,12 +104,15 @@ describe("plugin entry", () => {
     expect(entry.name).toBe("Outlook");
   });
 
-  it("registers all 15 tools", async () => {
+  it("registers all 21 tools", async () => {
     const { api } = await loadPlugin();
     expect(Object.keys(api.tools).sort()).toEqual([
       "outlook_calendar_fetch",
+      "outlook_complete_task",
       "outlook_create_event",
+      "outlook_create_task",
       "outlook_delete_event",
+      "outlook_delete_task",
       "outlook_flag",
       "outlook_forward",
       "outlook_inbox",
@@ -90,7 +124,10 @@ describe("plugin entry", () => {
       "outlook_save_attachments",
       "outlook_search",
       "outlook_send",
+      "outlook_task_lists",
+      "outlook_tasks",
       "outlook_update_event",
+      "outlook_update_task",
     ]);
   });
 });
@@ -298,5 +335,88 @@ describe("outlook_query_events", () => {
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_query_events"].execute("id", { text: "Standup" })) as { count: number };
     expect(data.count).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tasks: outlook_task_lists / outlook_tasks / outlook_create_task
+// ---------------------------------------------------------------------------
+
+describe("outlook tasks", () => {
+  it("lists task lists", async () => {
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_task_lists"].execute("id", {})) as { count: number };
+    expect(data.count).toBe(2);
+  });
+
+  it("lists tasks", async () => {
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200], [TASKS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_tasks"].execute("id", { task_list: "Tasks" })) as { count: number; tasks: Array<Record<string, unknown>> };
+    expect(data.count).toBe(1);
+    expect(data.tasks[0].title).toBe("Pay rent");
+  });
+
+  it("creates a task", async () => {
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200], [TASK_CREATED, 201]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_create_task"].execute("id", {
+      title: "Buy milk",
+      notes: "Whole milk",
+      importance: "high",
+      due: "2026-05-03T00:00:00",
+    })) as Record<string, unknown>;
+    expect(data.ok).toBe(true);
+    expect((data.task as Record<string, unknown>).title).toBe("Buy milk");
+  });
+
+  it("updates a task", async () => {
+    const updated = JSON.stringify({
+      id: "task-1",
+      title: "Pay rent",
+      status: "completed",
+      importance: "high",
+      createdDateTime: "2026-05-02T08:00:00Z",
+      lastModifiedDateTime: "2026-05-02T08:15:00Z",
+      body: { contentType: "text", content: "May rent" },
+    });
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200], [updated, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_update_task"].execute("id", {
+      task_id: "task-1",
+      task_list: "Tasks",
+      status: "completed",
+    })) as Record<string, unknown>;
+    expect(data.ok).toBe(true);
+  });
+
+  it("completes a task", async () => {
+    const updated = JSON.stringify({
+      id: "task-1",
+      title: "Pay rent",
+      status: "completed",
+      importance: "normal",
+      createdDateTime: "2026-05-02T08:00:00Z",
+      lastModifiedDateTime: "2026-05-02T08:15:00Z",
+      body: { contentType: "text", content: "May rent" },
+    });
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200], [updated, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_complete_task"].execute("id", {
+      task_id: "task-1",
+      task_list: "Tasks",
+    })) as Record<string, unknown>;
+    expect(data.ok).toBe(true);
+  });
+
+  it("deletes a task", async () => {
+    mockHttpsSeq([TOKEN, 200], [TASK_LISTS, 200], ["", 204]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_delete_task"].execute("id", {
+      task_id: "task-1",
+      task_list: "Tasks",
+    })) as Record<string, unknown>;
+    expect(data.ok).toBe(true);
   });
 });

@@ -29,6 +29,7 @@ const CALENDAR_DEFAULTS: Record<string, string[]> = {
   personal: ["calendar", "personal"],
   family: ["family v2", "your family", "family"],
 };
+const TASK_LIST_DEFAULTS = ["tasks", "to do"];
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -107,7 +108,7 @@ async function getAccessToken(clientId: string, clientSecret: string, refreshTok
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: "refresh_token",
-    scope: "Calendars.ReadWrite Mail.ReadWrite Mail.Send offline_access",
+    scope: "Calendars.ReadWrite Mail.ReadWrite Mail.Send Tasks.ReadWrite offline_access",
   }).toString();
   const res = await httpPost(TOKEN_URL, body, { "Content-Type": "application/x-www-form-urlencoded" });
   const parsed = JSON.parse(res);
@@ -182,6 +183,56 @@ function formatMessage(m: Record<string, unknown>, includeBody = false): Record<
   };
   if (includeBody) result.body_preview = (m.bodyPreview as string ?? "").slice(0, 500);
   return result;
+}
+
+function stripHtml(input: string): string {
+  return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function formatTask(task: Record<string, unknown>): Record<string, unknown> {
+  const due = task.dueDateTime as Record<string, string> | undefined;
+  const reminder = task.reminderDateTime as Record<string, string> | undefined;
+  const body = task.body as Record<string, string> | undefined;
+  const bodyContent = body?.content ?? "";
+  return {
+    id: String(task.id ?? ""),
+    title: String(task.title ?? "No title"),
+    status: String(task.status ?? "notStarted"),
+    importance: String(task.importance ?? "normal"),
+    created: String(task.createdDateTime ?? ""),
+    last_modified: String(task.lastModifiedDateTime ?? ""),
+    due: due?.dateTime ? { dateTime: due.dateTime, timeZone: due.timeZone ?? "" } : null,
+    reminder: reminder?.dateTime ? { dateTime: reminder.dateTime, timeZone: reminder.timeZone ?? "" } : null,
+    notes: bodyContent ? (body?.contentType === "html" ? stripHtml(bodyContent) : bodyContent) : "",
+  };
+}
+
+async function listTaskLists(token: string): Promise<Array<Record<string, unknown>>> {
+  const data = await graphGet(token, "/me/todo/lists?$top=100") as { value: Array<Record<string, unknown>> };
+  return data.value ?? [];
+}
+
+async function resolveTaskList(
+  token: string,
+  selector?: string,
+): Promise<{ id: string; name: string; lists: Array<Record<string, unknown>> }> {
+  const lists = await listTaskLists(token);
+  if (!lists.length) {
+    throw new Error("No Microsoft To Do lists found");
+  }
+  const sel = selector?.trim().toLowerCase();
+  const byId = selector ? lists.find(l => String(l.id ?? "") === selector) : undefined;
+  const byName = sel ? lists.find(l => String(l.displayName ?? "").trim().toLowerCase() === sel) : undefined;
+  const byDefault = lists.find(l => TASK_LIST_DEFAULTS.includes(String(l.displayName ?? "").trim().toLowerCase()));
+  const chosen = byId ?? byName ?? byDefault ?? lists[0];
+  if (!chosen?.id) {
+    throw new Error("Unable to resolve Microsoft To Do list");
+  }
+  return {
+    id: String(chosen.id),
+    name: String(chosen.displayName ?? chosen.id),
+    lists,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -842,4 +893,157 @@ export async function flagMessage(
   const res = await graphPatch(token, `/me/messages/${encodeURIComponent(msgId)}`, { flag: { flagStatus: params.flag_status } }) as Record<string, unknown>;
   if (res.error) return { error: JSON.stringify(res.error) };
   return { ok: true, flag_status: params.flag_status };
+}
+
+// ---------------------------------------------------------------------------
+// To Do / Tasks handlers
+// ---------------------------------------------------------------------------
+
+export interface ListTasksParams {
+  task_list?: string;
+}
+
+export async function listTaskListsHandler(
+  config: OutlookMailConfig,
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const lists = await listTaskLists(token);
+  return {
+    count: lists.length,
+    lists: lists.map(list => ({
+      id: String(list.id ?? ""),
+      display_name: String(list.displayName ?? ""),
+      is_default: Boolean(list.wellknownListName || list.isDefault),
+    })),
+  };
+}
+
+export async function listTasks(
+  config: OutlookMailConfig,
+  params: { task_list?: string; include_completed?: boolean; limit?: number },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const resolved = await resolveTaskList(token, params.task_list);
+  const data = await graphGet(token, `/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks?$top=100`) as { value: Array<Record<string, unknown>> };
+  let tasks = (data.value ?? []).map(formatTask);
+  if (!params.include_completed) {
+    tasks = tasks.filter(t => String((t as Record<string, unknown>).status ?? "") !== "completed");
+  }
+  const limit = params.limit ?? 20;
+  return {
+    list_id: resolved.id,
+    list_name: resolved.name,
+    count: tasks.slice(0, limit).length,
+    tasks: tasks.slice(0, limit),
+  };
+}
+
+export interface CreateTaskParams {
+  title: string;
+  task_list?: string;
+  due?: string;
+  reminder?: string;
+  notes?: string;
+  importance?: "low" | "normal" | "high";
+}
+
+export async function createTask(
+  config: OutlookMailConfig,
+  params: CreateTaskParams,
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  if (!params.title?.trim()) return { error: "title is required" };
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const resolved = await resolveTaskList(token, params.task_list);
+  const payload: Record<string, unknown> = { title: params.title.trim() };
+  if (params.notes) payload.body = { contentType: "text", content: params.notes };
+  if (params.importance) payload.importance = params.importance;
+  if (params.due) payload.dueDateTime = toGraphDateTime(params.due, "America/Los_Angeles");
+  if (params.reminder) payload.reminderDateTime = toGraphDateTime(params.reminder, "America/Los_Angeles");
+  const res = await graphPost(token, `/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks`, payload) as Record<string, unknown>;
+  if (res.error) return { error: JSON.stringify(res.error) };
+  return {
+    ok: true,
+    list_id: resolved.id,
+    list_name: resolved.name,
+    task: formatTask(res),
+  };
+}
+
+export interface UpdateTaskParams {
+  task_id: string;
+  task_list?: string;
+  title?: string;
+  due?: string;
+  reminder?: string;
+  notes?: string;
+  importance?: "low" | "normal" | "high";
+  status?: "notStarted" | "inProgress" | "completed";
+}
+
+export async function updateTask(
+  config: OutlookMailConfig,
+  params: UpdateTaskParams,
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  if (!params.task_id?.trim()) return { error: "task_id is required" };
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const resolved = await resolveTaskList(token, params.task_list);
+  const payload: Record<string, unknown> = {};
+  if (params.title !== undefined) payload.title = params.title.trim();
+  if (params.notes !== undefined) payload.body = { contentType: "text", content: params.notes };
+  if (params.importance) payload.importance = params.importance;
+  if (params.status) payload.status = params.status;
+  if (params.due !== undefined) payload.dueDateTime = params.due ? toGraphDateTime(params.due, "America/Los_Angeles") : null;
+  if (params.reminder !== undefined) payload.reminderDateTime = params.reminder ? toGraphDateTime(params.reminder, "America/Los_Angeles") : null;
+  if (!Object.keys(payload).length) return { error: "No fields to update were provided" };
+  const res = await graphPatch(
+    token,
+    `/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks/${encodeURIComponent(params.task_id)}`,
+    payload,
+  ) as Record<string, unknown>;
+  if (res.error) return { error: JSON.stringify(res.error) };
+  return {
+    ok: true,
+    list_id: resolved.id,
+    list_name: resolved.name,
+    task: formatTask(res),
+  };
+}
+
+export async function completeTask(
+  config: OutlookMailConfig,
+  params: { task_id: string; task_list?: string },
+): Promise<unknown> {
+  return updateTask(config, { task_id: params.task_id, task_list: params.task_list, status: "completed" });
+}
+
+export async function deleteTask(
+  config: OutlookMailConfig,
+  params: { task_id: string; task_list?: string },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  if (!params.task_id?.trim()) return { error: "task_id is required" };
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const resolved = await resolveTaskList(token, params.task_list);
+  const res = await httpRequest(
+    "DELETE",
+    `${GRAPH_BASE}/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks/${encodeURIComponent(params.task_id)}`,
+    token,
+  );
+  if (res.status === 204) {
+    return { ok: true, list_id: resolved.id, list_name: resolved.name, task_id: params.task_id };
+  }
+  if (res.status < 200 || res.status >= 300) {
+    const err = (() => { try { return JSON.parse(res.data ?? "{}"); } catch { return {}; } })();
+    return { error: `Graph API error ${res.status}: ${err?.error?.message ?? res.data}` };
+  }
+  return { ok: true, list_id: resolved.id, list_name: resolved.name, task_id: params.task_id };
 }

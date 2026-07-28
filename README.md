@@ -1,6 +1,6 @@
 # carapace-outlook
 
-Unified mail and calendar tools for Outlook / Microsoft 365 via Microsoft Graph API. Replaces the former `outlook-mail` and `outlook-calendar` plugins.
+Unified mail, calendar, and task tools for Outlook / Microsoft 365 via Microsoft Graph API. Replaces the former `outlook-mail` and `outlook-calendar` plugins.
 
 ## Setup
 
@@ -28,6 +28,7 @@ Unified mail and calendar tools for Outlook / Microsoft 365 via Microsoft Graph 
    - `Calendars.ReadWrite` — read and write calendar events
    - `Mail.ReadWrite` — read, move, flag, and manage mail
    - `Mail.Send` — send email
+   - `Tasks.ReadWrite` — create and manage Microsoft To Do tasks
    - `offline_access` — required to get a refresh token
 3. Click **Grant admin consent** if prompted (for work accounts); personal accounts consent at auth time
 
@@ -40,7 +41,7 @@ https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
   ?client_id=YOUR_CLIENT_ID
   &response_type=code
   &redirect_uri=http%3A%2F%2Flocalhost
-  &scope=Calendars.ReadWrite+Mail.ReadWrite+Mail.Send+offline_access
+  &scope=Calendars.ReadWrite+Mail.ReadWrite+Mail.Send+Tasks.ReadWrite+offline_access
   &response_mode=query
 ```
 
@@ -102,7 +103,7 @@ Credentials can be passed directly in config or via environment variables — en
 |-------|------|----------|-------------|
 | `clientId` | string | Yes | Azure app client ID |
 | `clientSecret` | string | Yes | Azure app client secret |
-| `refreshToken` | string | Yes | OAuth refresh token with mail + calendar scopes |
+| `refreshToken` | string | Yes | OAuth refresh token with mail + calendar + task scopes |
 | `personalCalendarNames` | string[] | No | Additional calendar names to treat as personal (default: `["Calendar", "calendar"]`) |
 | `familyCalendarNames` | string[] | No | Additional calendar names to treat as family (default: `["Your Family", "Family"]`) |
 
@@ -134,6 +135,17 @@ Credentials can be passed directly in config or via environment variables — en
 | [`outlook_delete_event`](#outlook_delete_event) | Delete a calendar event by ID |
 | [`outlook_meeting`](#outlook_meeting) | Create a meeting and send invites to attendees |
 | [`outlook_query_events`](#outlook_query_events) | Query events by date range, text, attendee, or UID |
+
+### Tasks
+
+| Tool | Description |
+|------|-------------|
+| [`outlook_task_lists`](#outlook_task_lists) | List Microsoft To Do lists available on the account |
+| [`outlook_tasks`](#outlook_tasks) | List tasks from a Microsoft To Do list |
+| [`outlook_create_task`](#outlook_create_task) | Create a Microsoft To Do task |
+| [`outlook_update_task`](#outlook_update_task) | Update an existing task |
+| [`outlook_complete_task`](#outlook_complete_task) | Mark a task complete |
+| [`outlook_delete_task`](#outlook_delete_task) | Delete a task |
 
 ---
 

@@ -1,0 +1,36 @@
+{
+  "name": "carapace-outlook",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/plugin.js",
+  "bin": {
+    "carapace-outlook": "./dist/bin/outlook.js"
+  },
+  "scripts": {
+    "build": "tsup && carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "carapace-plugin-sdk": "^1.0.3",
+    "tsup": "^8.3.0",
+    "typescript": "^7",
+    "vitest": "^4.1.10"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/adapter.js"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "^2026.4.23"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.52"
+  }
+}

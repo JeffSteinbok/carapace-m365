@@ -1,6 +1,8 @@
-# carapace-outlook
+# 📧 carapace-outlook
 
 Unified mail, calendar, and task tools for Outlook / Microsoft 365 via Microsoft Graph API. Replaces the former `outlook-mail` and `outlook-calendar` plugins.
+
+Built with [🦞🐚 Carapace](https://github.com/JeffSteinbok/carapace-plugin-sdk).
 
 ## Setup
 

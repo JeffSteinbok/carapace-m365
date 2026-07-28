@@ -1,0 +1,8 @@
+CARAPACE
+
+carapace-outlook
+
+Outlook & Microsoft 365 integration for OpenClaw — mail, calendar,
+and tasks via Microsoft Graph, with secret-less PKCE auth.
+
+• mail  • calendar  • tasks

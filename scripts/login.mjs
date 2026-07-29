@@ -22,6 +22,10 @@ import { spawn } from "node:child_process";
 import { URL } from "node:url";
 
 const TENANT = "consumers"; // personal Microsoft accounts
+// Published public-client app registration (client IDs are not secrets).
+// Users can run this with no client ID to use the shared registration, or
+// override with --client-id / OUTLOOK_CLIENT_ID to use their own app.
+const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 const AUTH_URL = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
 const TOKEN_URL = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
 const SCOPE = "Calendars.ReadWrite Mail.ReadWrite Mail.Send Tasks.ReadWrite offline_access openid";
@@ -32,14 +36,19 @@ function arg(name, fallback) {
   return fallback;
 }
 
-const clientId = arg("client-id", process.env.OUTLOOK_CLIENT_ID);
+const clientId = arg("client-id", process.env.OUTLOOK_CLIENT_ID || DEFAULT_CLIENT_ID);
 const port = Number(arg("port", "53682"));
 const redirectUri = `http://localhost:${port}`;
 
 if (!clientId) {
-  console.error("Error: provide the app client ID via --client-id or OUTLOOK_CLIENT_ID.");
+  console.error("Error: no client ID resolved (unexpected — a default is provided).");
   process.exit(1);
 }
+
+const usingDefault = clientId === DEFAULT_CLIENT_ID;
+console.log(usingDefault
+  ? `Using the published carapace-outlook app (${clientId}).`
+  : `Using client ID ${clientId}.`);
 
 function base64url(buf) {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

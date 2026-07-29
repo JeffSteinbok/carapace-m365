@@ -29,6 +29,15 @@ import {
   type OutlookCalendarConfig,
 } from "./handlers.js";
 
+/**
+ * Published public-client app registration (PKCE, personal Microsoft accounts).
+ * The client ID of a public client is not a secret, so it ships as the default:
+ * users can run `npm run login` and consent with their own account without
+ * registering their own Azure app. Override via config.clientId or
+ * OUTLOOK_CLIENT_ID to point at your own registration.
+ */
+export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
+
 export const createEntry = definePlugin({
   id: "outlook",
   name: "Outlook",
@@ -484,7 +493,7 @@ function resolveConfig(config: {
     return String(process.env[envKey] ?? "").split(",").map(n => n.trim().toLowerCase()).filter(Boolean);
   };
   return {
-    clientId: config.clientId?.trim() || process.env.OUTLOOK_CLIENT_ID || "",
+    clientId: config.clientId?.trim() || process.env.OUTLOOK_CLIENT_ID || DEFAULT_CLIENT_ID,
     clientSecret: config.clientSecret?.trim() || process.env.OUTLOOK_CLIENT_SECRET || "",
     refreshToken: config.refreshToken?.trim() || process.env.OUTLOOK_REFRESH_TOKEN || "",
     personalCalendarNames: parseNames(config.personalCalendarNames, "OUTLOOK_PERSONAL_CALENDAR_NAMES"),

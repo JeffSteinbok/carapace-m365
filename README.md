@@ -1,4 +1,4 @@
-# 🐚 Carapace Microsoft 365
+# 📧 📅 ✅ 📁 Carapace Microsoft 365
 
 Microsoft 365 tools for Outlook mail, calendars, Microsoft To Do, and OneDrive
 through Microsoft Graph.

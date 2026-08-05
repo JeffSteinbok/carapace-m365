@@ -6,6 +6,7 @@ import http, {
 } from "node:http";
 import { pathToFileURL } from "node:url";
 import {
+  getDisallowedGraphScopes,
   GraphTokenManager,
   type AccessToken,
 } from "@carapace/m365-graph-auth";
@@ -63,6 +64,7 @@ async function handleTokenRequest(
   options: {
     tokenSource: TokenSource;
     secret: string;
+    features: ServiceConfig["features"];
   },
 ): Promise<void> {
   if (req.method !== "POST") {
@@ -95,6 +97,15 @@ async function handleTokenRequest(
       return;
     }
     const scopes = body.scopes as string[];
+    const disallowedScopes = getDisallowedGraphScopes(scopes, options.features);
+    if (disallowedScopes.length) {
+      json(res, 403, {
+        error: "scope_not_allowed",
+        error_description:
+          `Requested Microsoft Graph scope(s) are not permitted by configured features: ${disallowedScopes.join(", ")}`,
+      });
+      return;
+    }
     const token = await options.tokenSource.getToken(scopes);
     json(res, 200, {
       access_token: token.accessToken,
@@ -112,7 +123,7 @@ async function handleTokenRequest(
 export function createServiceServer(options: {
   config: Pick<
     ServiceConfig,
-    "tokenPath" | "tokenBrokerSecret" | "webhookPath"
+    "tokenPath" | "tokenBrokerSecret" | "webhookPath" | "features"
   >;
   tokenSource: TokenSource;
   graph?: GraphClient;
@@ -130,6 +141,7 @@ export function createServiceServer(options: {
       await handleTokenRequest(req, res, {
         tokenSource: options.tokenSource,
         secret: options.config.tokenBrokerSecret,
+        features: options.config.features,
       });
       return;
     }

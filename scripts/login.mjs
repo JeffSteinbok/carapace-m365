@@ -3,25 +3,17 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import {
+  DEFAULT_M365_FEATURES,
+  M365_FEATURE_POLICY,
+  M365_FEATURES,
+  deriveFeatureGraphScopes,
+  inferM365FeaturesFromScopes,
+  normalizeGraphScopeNames,
+  parseM365Features,
+} from "../packages/m365-graph-auth/src/feature-policy.js";
 
 const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
-const DEFAULT_FEATURES = [
-  "calendar-write",
-  "mail-write",
-  "mail-send",
-  "tasks-write",
-];
-const FEATURES = {
-  "mail-read": ["Mail.Read"],
-  "mail-write": ["Mail.ReadWrite"],
-  "mail-send": ["Mail.Send"],
-  "calendar-read": ["Calendars.Read"],
-  "calendar-write": ["Calendars.ReadWrite"],
-  "tasks-read": ["Tasks.Read"],
-  "tasks-write": ["Tasks.ReadWrite"],
-  "onedrive-read": ["Files.Read"],
-  "onedrive-write": ["Files.ReadWrite"],
-};
 
 function arg(name, fallback) {
   const index = process.argv.indexOf(`--${name}`);
@@ -52,7 +44,7 @@ Options:
   --help             Show this help
 
 The default preserves the pre-OneDrive Outlook consent:
-  ${DEFAULT_FEATURES.join(", ")}
+  ${DEFAULT_M365_FEATURES.join(", ")}
 
 offline_access and openid are added only to this interactive authorization
 request so Microsoft can issue a refresh token.`);
@@ -63,8 +55,10 @@ if (hasArg("help")) {
   process.exit(0);
 }
 if (hasArg("list-features")) {
-  for (const [feature, scopes] of Object.entries(FEATURES)) {
-    console.log(`${feature.padEnd(16)} ${scopes.join(" ")}`);
+  for (const feature of M365_FEATURES) {
+    console.log(
+      `${feature.padEnd(16)} ${M365_FEATURE_POLICY[feature].scopes.join(" ")}`,
+    );
   }
   process.exit(0);
 }
@@ -84,24 +78,39 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const explicitScopes = arg("scopes", "");
-const requestedFeatures = arg("features", DEFAULT_FEATURES.join(","))
-  .split(",")
-  .map((feature) => feature.trim().toLowerCase())
-  .filter(Boolean);
-const unknownFeatures = requestedFeatures.filter((feature) => !FEATURES[feature]);
-if (!explicitScopes && unknownFeatures.length) {
-  console.error(`Error: unknown feature(s): ${unknownFeatures.join(", ")}`);
+let requestedFeatures;
+try {
+  requestedFeatures = parseM365Features(
+    arg("features", DEFAULT_M365_FEATURES.join(",")),
+  );
+} catch (error) {
+  console.error(`Error: ${error.message}`);
   console.error("Run with --list-features to see valid names.");
   process.exit(1);
 }
 
 const delegatedScopes = explicitScopes
-  ? explicitScopes.split(/[\s,]+/).map((scope) => scope.trim()).filter(Boolean)
-  : requestedFeatures.flatMap((feature) => FEATURES[feature]);
-const scopes = [...new Set([...delegatedScopes, "offline_access", "openid"])];
+  ? normalizeGraphScopeNames(explicitScopes.split(/[\s,]+/))
+  : deriveFeatureGraphScopes(requestedFeatures);
+const inferred = explicitScopes
+  ? inferM365FeaturesFromScopes(delegatedScopes)
+  : { features: requestedFeatures, unknownScopes: [] };
+const scopes = normalizeGraphScopeNames([
+  ...delegatedScopes,
+  "offline_access",
+  "openid",
+]);
 if (delegatedScopes.length === 0) {
   console.error("Error: select at least one feature or delegated scope.");
   process.exit(1);
+}
+if (inferred.unknownScopes.length) {
+  console.warn(
+    `Warning: these scopes are not represented by supported Microsoft 365 features: ${inferred.unknownScopes.join(", ")}`,
+  );
+  console.warn(
+    "The broker will reject them until its shared feature policy and configured allowlist are updated manually.",
+  );
 }
 
 const redirectUri = `http://localhost:${port}`;
@@ -224,7 +233,19 @@ const server = http.createServer(async (req, res) => {
     res.end("<h1>Signed in</h1><p>You can close this tab and return to the terminal.</p>");
     console.log("\nRefresh token acquired. Store it in the webhook service state or environment:\n");
     console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
-    console.log(`# Backward-compatible alias: OUTLOOK_REFRESH_TOKEN=${tokens.refresh_token}\n`);
+    console.log(`# Backward-compatible alias: OUTLOOK_REFRESH_TOKEN=${tokens.refresh_token}`);
+    console.log(`M365_FEATURES=${inferred.features.join(",")}`);
+    console.log("\nUse the same features in the plugin config:\n");
+    console.log(JSON.stringify({ features: inferred.features }, null, 2));
+    if (inferred.unknownScopes.length) {
+      console.warn(
+        `\nWarning: M365_FEATURES covers only recognized scopes; not covered: ${inferred.unknownScopes.join(", ")}`,
+      );
+      console.warn(
+        "Do not treat this as a complete broker allowlist. Update the shared feature policy and set the matching broker/plugin features manually.",
+      );
+    }
+    console.log();
   } catch (error) {
     res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
     res.end("<h1>Token exchange failed</h1>");

@@ -6,6 +6,8 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
+    "allowJs": true,
+    "checkJs": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

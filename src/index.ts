@@ -2,9 +2,18 @@
  * Outlook plugin — unified mail + calendar tools via Microsoft Graph.
  */
 
-import { definePlugin } from "carapace-plugin-sdk";
+import {
+  definePlugin,
+  type PluginApi,
+  type PluginEntry,
+} from "carapace-plugin-sdk";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_TOKEN_BROKER_URL } from "@carapace/m365-graph-auth";
+import {
+  DEFAULT_TOKEN_BROKER_URL,
+  isM365FeatureEnabled,
+  parseM365Features,
+  type M365Feature,
+} from "@carapace/m365-graph-auth";
 import {
   fetchCalendar,
   createEvent,
@@ -50,7 +59,7 @@ import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
  */
 export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 
-export const createEntry = definePlugin({
+const createBaseEntry = definePlugin({
   id: "outlook",
   name: "Microsoft 365",
   description: "Outlook mail, calendar, tasks, and OneDrive tools via Microsoft Graph",
@@ -63,6 +72,11 @@ export const createEntry = definePlugin({
     tenant: Type.Optional(Type.String({ description: "Microsoft OAuth tenant (default: consumers)" })),
     tokenBrokerUrl: Type.Optional(Type.String({ description: "Authoritative Microsoft 365 token broker URL" })),
     tokenBrokerSecret: Type.Optional(Type.String({ description: "Bearer secret used to authenticate to the token broker" })),
+    features: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "Microsoft 365 features to register. Defaults preserve pre-OneDrive Outlook behavior.",
+      }),
+    ),
     personalCalendarNames: Type.Optional(
       Type.Array(Type.String(), { description: "Additional personal calendar names to match." }),
     ),
@@ -643,6 +657,73 @@ export const createEntry = definePlugin({
   ],
 });
 
+export const TOOL_REQUIRED_FEATURE = {
+  outlook_inbox: "mail-read",
+  outlook_search: "mail-read",
+  outlook_read: "mail-read",
+  outlook_save_attachments: "mail-read",
+  outlook_send: "mail-send",
+  outlook_reply: "mail-send",
+  outlook_forward: "mail-send",
+  outlook_move: "mail-write",
+  outlook_flag: "mail-write",
+  outlook_task_lists: "tasks-read",
+  outlook_tasks: "tasks-read",
+  outlook_create_task: "tasks-write",
+  outlook_update_task: "tasks-write",
+  outlook_complete_task: "tasks-write",
+  outlook_delete_task: "tasks-write",
+  outlook_calendar_fetch: "calendar-read",
+  outlook_create_event: "calendar-write",
+  outlook_update_event: "calendar-write",
+  outlook_delete_event: "calendar-write",
+  outlook_meeting: "calendar-write",
+  outlook_query_events: "calendar-read",
+  onedrive_list: "onedrive-read",
+  onedrive_search: "onedrive-read",
+  onedrive_metadata: "onedrive-read",
+  onedrive_download: "onedrive-read",
+  onedrive_upload: "onedrive-write",
+  onedrive_create_folder: "onedrive-write",
+  onedrive_move: "onedrive-write",
+  onedrive_delete: "onedrive-write",
+} as const satisfies Record<string, M365Feature>;
+
+function configuredFeatures(config: Record<string, unknown> | undefined): M365Feature[] {
+  if (config && Object.prototype.hasOwnProperty.call(config, "features")) {
+    return parseM365Features(config.features as readonly unknown[]);
+  }
+  const envFeatures = process.env.M365_FEATURES?.trim()
+    || process.env.OUTLOOK_FEATURES?.trim();
+  return parseM365Features(envFeatures || undefined);
+}
+
+export function createEntry(): PluginEntry {
+  const entry = createBaseEntry();
+  const registerAll = entry.register.bind(entry);
+  return {
+    ...entry,
+    register(api: PluginApi) {
+      const features = configuredFeatures(api.pluginConfig);
+      registerAll({
+        ...api,
+        registerTool(tool: unknown) {
+          const name = (tool as { name?: unknown })?.name;
+          if (typeof name !== "string" || !(name in TOOL_REQUIRED_FEATURE)) {
+            throw new Error(`Microsoft 365 tool is missing a feature policy: ${String(name)}`);
+          }
+          const required = TOOL_REQUIRED_FEATURE[
+            name as keyof typeof TOOL_REQUIRED_FEATURE
+          ];
+          if (isM365FeatureEnabled(features, required)) {
+            api.registerTool(tool);
+          }
+        },
+      });
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Config resolver
 // ---------------------------------------------------------------------------
@@ -655,6 +736,7 @@ function resolveConfig(config: {
   tenant?: string;
   tokenBrokerUrl?: string;
   tokenBrokerSecret?: string;
+  features?: string[];
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
 }): OutlookCalendarConfig {

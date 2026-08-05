@@ -3,6 +3,7 @@ import http from "node:http";
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  DEFAULT_M365_FEATURES,
   GraphTokenManager,
   type HttpRequest,
 } from "@carapace/m365-graph-auth";
@@ -11,6 +12,7 @@ import type { GraphClient } from "../src/graph.js";
 import { StateStore } from "../src/state.js";
 
 const scratch = resolve("services", "m365-webhook", ".test-state");
+const validAuthorization = ["Bearer", "expected-secret"].join(" ");
 
 afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
@@ -61,6 +63,7 @@ describe("m365 webhook token broker", () => {
         tokenPath: "/token",
         tokenBrokerSecret: "expected-secret",
         webhookPath: "/outlook/webhook",
+        features: [...DEFAULT_M365_FEATURES],
       },
       tokenSource: { getToken },
     });
@@ -83,6 +86,48 @@ describe("m365 webhook token broker", () => {
     expect(JSON.parse(authorized.body).access_token).toBe("broker-token");
     expect(getToken).toHaveBeenCalledOnce();
     expect(getToken).toHaveBeenCalledWith(["Mail.Read"]);
+  });
+
+  it("allows only scopes authorized by the service feature allowlist", async () => {
+    const getToken = vi.fn().mockResolvedValue({
+      accessToken: "broker-token",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    const server = createServiceServer({
+      config: {
+        tokenPath: "/token",
+        tokenBrokerSecret: "expected-secret",
+        webhookPath: "/outlook/webhook",
+        features: ["onedrive-read"],
+      },
+      tokenSource: { getToken },
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    const allowed = await callServer(port, {
+      authorization: validAuthorization,
+      body: { scopes: ["files.read"] },
+    });
+    const denied = await callServer(port, {
+      authorization: validAuthorization,
+      body: { scopes: ["Files.ReadWrite"] },
+    });
+    const unknown = await callServer(port, {
+      authorization: validAuthorization,
+      body: { scopes: ["User.Read"] },
+    });
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+
+    expect(allowed.status).toBe(200);
+    expect(denied.status).toBe(403);
+    expect(JSON.parse(denied.body)).toMatchObject({
+      error: "scope_not_allowed",
+    });
+    expect(unknown.status).toBe(403);
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(getToken).toHaveBeenCalledWith(["files.read"]);
   });
 
   it("atomically persists refresh-token rotation without losing subscription state", async () => {

@@ -30,6 +30,7 @@ node services/m365-webhook/dist/index.js
 | `M365_CLIENT_SECRET` | `OUTLOOK_CLIENT_SECRET` | Optional confidential-client secret |
 | `M365_TENANT` | `OUTLOOK_TENANT`, then `consumers` | OAuth tenant such as `common` or a tenant ID |
 | `M365_REFRESH_TOKEN` | `OUTLOOK_REFRESH_TOKEN` | Initial token, used when state has no token |
+| `M365_FEATURES` | `OUTLOOK_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Authoritative comma-separated broker scope allowlist |
 | `M365_TOKEN_BROKER_SECRET` | `OUTLOOK_TOKEN_BROKER_SECRET` | Required bearer secret for `/token` |
 | `M365_TOKEN_BROKER_BIND` | `OUTLOOK_TOKEN_BROKER_BIND`, then `127.0.0.1` | HTTP bind address |
 | `M365_TOKEN_BROKER_PORT` | `OUTLOOK_TOKEN_BROKER_PORT`, `M365_WEBHOOK_PORT`, `OUTLOOK_WEBHOOK_PORT`, then `18790` | Shared broker/webhook port |
@@ -50,6 +51,13 @@ exists, the service reuses the old path automatically.
 Use long independently generated values for `M365_TOKEN_BROKER_SECRET` and
 `M365_WEBHOOK_CLIENT_STATE`. Neither is logged.
 
+Set `M365_FEATURES` to the exact same normalized feature list used by the
+plugin. Supported values are `mail-read`, `mail-write`, `mail-send`,
+`calendar-read`, `calendar-write`, `tasks-read`, `tasks-write`,
+`onedrive-read`, and `onedrive-write`. Write features imply their matching read
+feature. `mail-send` is independent. The default preserves pre-OneDrive Outlook
+behavior, so OneDrive scopes are denied unless explicitly enabled.
+
 ## Token endpoint
 
 The plugin calls:
@@ -63,11 +71,18 @@ Content-Type: application/json
 ```
 
 Successful responses contain an access token and expiry. The endpoint accepts
-only authenticated requests and delegated scope-name syntax. Loopback HTTP is
-the default; use HTTPS for any non-loopback broker URL.
+only authenticated requests and delegated scope-name syntax, then checks every
+scope case-insensitively against its own `M365_FEATURES` allowlist. Disallowed
+or unknown scopes return JSON HTTP 403 without contacting Microsoft. Loopback
+HTTP is the default; use HTTPS for any non-loopback broker URL.
 
 All refreshes are serialized across scope sets. If Microsoft returns a rotated
 `refresh_token`, it is written atomically before it is used for later refreshes.
+
+This is one of three enforcement layers: plugin feature configuration controls
+tool registration, this service independently controls broker scopes, and
+Microsoft consent controls what the refresh token can actually obtain. None of
+the layers expands either of the others.
 
 ## State
 

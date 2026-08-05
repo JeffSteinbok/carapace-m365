@@ -39,18 +39,18 @@ sensitive and must be protected.
 Under **API permissions → Add a permission → Microsoft Graph → Delegated
 permissions**, select only the capabilities you intend to use:
 
-| Capability | Delegated permission |
-|---|---|
-| Read mail and receive inbox webhooks | `Mail.Read` |
-| Move/flag/manage mail | `Mail.ReadWrite` |
-| Send/reply/forward | `Mail.Send` |
-| Read calendars | `Calendars.Read` |
-| Modify calendars | `Calendars.ReadWrite` |
-| Read To Do tasks | `Tasks.Read` |
-| Modify To Do tasks | `Tasks.ReadWrite` |
-| Read/download OneDrive | `Files.Read` |
-| Modify OneDrive | `Files.ReadWrite` |
-| Issue refresh tokens during login | `offline_access` |
+| Feature | Capability | Delegated permission |
+|---|---|---|
+| `mail-read` | Read mail and receive inbox webhooks | `Mail.Read` |
+| `mail-write` | Move/flag/manage mail; also enables reads | `Mail.ReadWrite` |
+| `mail-send` | Send/reply/forward | `Mail.Send` |
+| `calendar-read` | Read calendars | `Calendars.Read` |
+| `calendar-write` | Modify calendars; also enables reads | `Calendars.ReadWrite` |
+| `tasks-read` | Read To Do tasks | `Tasks.Read` |
+| `tasks-write` | Modify To Do tasks; also enables reads | `Tasks.ReadWrite` |
+| `onedrive-read` | Read/download OneDrive | `Files.Read` |
+| `onedrive-write` | Modify OneDrive; also enables reads | `Files.ReadWrite` |
+| Login-only | Issue refresh tokens during login | `offline_access` |
 
 Do not add `.All` application permissions. This integration uses delegated
 permissions as the signed-in user.
@@ -62,6 +62,11 @@ the broker-owned refresh token in its state file.
 
 Work/school tenant policy may require administrator consent. Personal Microsoft
 accounts usually allow user consent for these delegated permissions.
+
+The default feature list is
+`calendar-write,mail-write,mail-send,tasks-write`. It preserves pre-OneDrive
+behavior; OneDrive tools and broker scopes remain disabled until explicitly
+configured.
 
 ## Public-client login examples
 
@@ -92,11 +97,26 @@ The resulting value should normally be owned by the webhook/token broker:
 ```text
 M365_CLIENT_ID=your-client-id
 M365_REFRESH_TOKEN=returned-refresh-token
+M365_FEATURES=calendar-write,mail-write,mail-send,tasks-write
 M365_TOKEN_BROKER_SECRET=long-random-bearer-secret
 ```
 
+Use the same list in the plugin:
+
+```json
+{
+  "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"]
+}
+```
+
 `OUTLOOK_CLIENT_ID`, `OUTLOOK_REFRESH_TOKEN`, and
-`OUTLOOK_TOKEN_BROKER_SECRET` remain accepted aliases.
+`OUTLOOK_TOKEN_BROKER_SECRET` remain accepted aliases. `OUTLOOK_FEATURES` is
+also accepted as the broker/plugin environment fallback.
+
+The list participates in three independent enforcement layers: plugin tool
+registration, the broker's authoritative scope allowlist, and Microsoft
+consent. Configure the same features in the first two layers, then consent to
+their scopes. Unknown features and scopes fail closed.
 
 ## Confidential-client authorization
 

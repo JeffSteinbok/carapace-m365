@@ -1,6 +1,8 @@
 {
   "extends": "carapace-plugin-sdk/tsconfig.base.json",
   "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
     "rootDir": "."
   },
   "include": [

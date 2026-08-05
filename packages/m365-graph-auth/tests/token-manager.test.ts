@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_M365_FEATURES,
   GraphTokenManager,
+  deriveAllowedGraphScopes,
+  inferM365FeaturesFromScopes,
+  isM365FeatureEnabled,
+  parseM365Features,
   type HttpRequest,
   type HttpResponse,
 } from "../src/index.js";
@@ -12,6 +17,44 @@ function response(body: Record<string, unknown>, status = 200): HttpResponse {
     body: Buffer.from(JSON.stringify(body)),
   };
 }
+
+describe("Microsoft 365 feature policy", () => {
+  it("strictly normalizes features and preserves backward-compatible defaults", () => {
+    expect(parseM365Features(undefined)).toEqual(DEFAULT_M365_FEATURES);
+    expect(parseM365Features(" MAIL-READ,mail-read,OneDrive-Write ")).toEqual([
+      "mail-read",
+      "onedrive-write",
+    ]);
+    expect(() => parseM365Features("mail-read,unknown")).toThrow(
+      "Unknown Microsoft 365 feature(s): unknown",
+    );
+    expect(() => parseM365Features(["mail-read", 42])).toThrow(
+      "Microsoft 365 features must be strings",
+    );
+  });
+
+  it("applies write-to-read implications when deriving allowed scopes", () => {
+    expect(isM365FeatureEnabled(["mail-write"], "mail-read")).toBe(true);
+    expect(isM365FeatureEnabled(["mail-send"], "mail-read")).toBe(false);
+    expect(deriveAllowedGraphScopes(["calendar-write", "onedrive-write"])).toEqual([
+      "Calendars.ReadWrite",
+      "Files.ReadWrite",
+      "Calendars.Read",
+      "Files.Read",
+    ]);
+  });
+
+  it("infers only features represented by exact known scope names", () => {
+    expect(inferM365FeaturesFromScopes([
+      "mail.read",
+      "Files.ReadWrite",
+      "User.Read",
+    ])).toEqual({
+      features: ["mail-read", "onedrive-write"],
+      unknownScopes: ["User.Read"],
+    });
+  });
+});
 
 describe("GraphTokenManager", () => {
   it("normalizes scopes and caches access tokens", async () => {

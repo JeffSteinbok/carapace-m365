@@ -1,5 +1,24 @@
 import http from "node:http";
 import https from "node:https";
+import { M365_FEATURE_POLICY } from "./feature-policy.js";
+
+export {
+  DEFAULT_M365_FEATURES,
+  M365_FEATURE_POLICY,
+  M365_FEATURES,
+  UnknownM365FeatureError,
+  deriveAllowedGraphScopes,
+  deriveFeatureGraphScopes,
+  expandM365Features,
+  getDisallowedGraphScopes,
+  inferM365FeaturesFromScopes,
+  isM365FeatureEnabled,
+  normalizeGraphScopeNames,
+  normalizeM365Features,
+  parseM365Features,
+} from "./feature-policy.js";
+
+export type M365Feature = keyof typeof M365_FEATURE_POLICY;
 
 export const DEFAULT_TOKEN_BROKER_URL = "http://127.0.0.1:18790/token";
 const tokenUrlForTenant = (tenant: string): string =>

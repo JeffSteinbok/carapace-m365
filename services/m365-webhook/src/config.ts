@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  parseM365Features,
+  type M365Feature,
+} from "@carapace/m365-graph-auth";
 
 export const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 export const SUBSCRIPTION_TTL_MS = 72 * 60 * 60 * 1000;
@@ -37,6 +41,7 @@ export interface ServiceConfig {
   clientId: string;
   clientSecret?: string;
   tenant: string;
+  features: M365Feature[];
   initialRefreshToken?: string;
   notifyTarget: string;
   notifyChannel: string;
@@ -117,6 +122,9 @@ export function loadServiceConfig(): ServiceConfig {
     ),
     clientSecret: env("M365_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET") || undefined,
     tenant: env("M365_TENANT", "OUTLOOK_TENANT") || "consumers",
+    features: parseM365Features(
+      env("M365_FEATURES", "OUTLOOK_FEATURES") || undefined,
+    ),
     initialRefreshToken: env("M365_REFRESH_TOKEN", "OUTLOOK_REFRESH_TOKEN") || undefined,
     notifyTarget: required(process.env.NOTIFY_TARGET?.trim() || "", "NOTIFY_TARGET"),
     notifyChannel: process.env.NOTIFY_CHANNEL?.trim() || "discord",

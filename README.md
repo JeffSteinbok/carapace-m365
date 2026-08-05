@@ -33,7 +33,9 @@ single-process use.
 ### 1. Consent only to the features you want
 
 The backward-compatible default grants the pre-OneDrive capabilities:
-calendar write, mail write/send, and task write. It does **not** add OneDrive.
+`calendar-write,mail-write,mail-send,tasks-write`. It does **not** add OneDrive,
+and OneDrive tools are not registered unless `onedrive-read` or
+`onedrive-write` is explicitly enabled.
 
 ```powershell
 npm run login
@@ -64,7 +66,8 @@ npm run login -- --scopes "Mail.Read Files.Read"
 Run `npm run login -- --list-features` for every feature name. The login command
 adds `offline_access` and `openid` because interactive authorization needs them
 to issue a refresh token; Graph access-token requests use only the scopes needed
-for each operation.
+for each operation. After consent it prints `M365_FEATURES` and a matching
+plugin `features` snippet; use that same normalized list in both places.
 
 ### 2. Run the token broker/webhook service
 
@@ -80,6 +83,7 @@ Set at least:
 ```text
 M365_CLIENT_ID=your-app-client-id
 M365_REFRESH_TOKEN=the-token-from-login
+M365_FEATURES=calendar-write,mail-write,mail-send,tasks-write
 M365_TOKEN_BROKER_SECRET=a-long-random-secret
 M365_WEBHOOK_URL=https://your-public-host/outlook/webhook
 M365_WEBHOOK_CLIENT_STATE=another-long-random-secret
@@ -108,6 +112,7 @@ The plugin ID intentionally remains `outlook`:
       "outlook": {
         "enabled": true,
         "config": {
+          "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
           "tokenBrokerUrl": "http://127.0.0.1:18790/token",
           "tokenBrokerSecret": "${M365_TOKEN_BROKER_SECRET}"
         }
@@ -131,6 +136,7 @@ For migration or a single process without the webhook broker:
       "outlook": {
         "enabled": true,
         "config": {
+          "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
           "clientId": "${M365_CLIENT_ID}",
           "refreshToken": "${M365_REFRESH_TOKEN}"
         }
@@ -154,21 +160,33 @@ processes must use broker mode so only one process owns refresh-token rotation.
 
 Choose the narrowest delegated permission that supports the desired operation.
 
-| Desired capability | Minimum Microsoft Graph delegated permission |
-|---|---|
-| List, search, read mail; download attachments; inbox webhook | `Mail.Read` |
-| Move or flag mail | `Mail.ReadWrite` |
-| Send, reply, or forward mail | `Mail.Send` |
-| Read calendars/events | `Calendars.Read` |
-| Create, update, delete events or meetings | `Calendars.ReadWrite` |
-| Read Microsoft To Do lists/tasks | `Tasks.Read` |
-| Create, update, complete, or delete tasks | `Tasks.ReadWrite` |
-| List, search, inspect, or download OneDrive content | `Files.Read` |
-| Upload, create, move, rename, or delete OneDrive content | `Files.ReadWrite` |
-| Receive a reusable refresh token during login | `offline_access` |
+| Feature | Desired capability | Minimum Microsoft Graph delegated permission |
+|---|---|---|
+| `mail-read` | List, search, read mail; download attachments; inbox webhook | `Mail.Read` |
+| `mail-write` | Move or flag mail; also enables mail reads | `Mail.ReadWrite` |
+| `mail-send` | Send, reply, or forward mail | `Mail.Send` |
+| `calendar-read` | Read calendars/events | `Calendars.Read` |
+| `calendar-write` | Create, update, delete events or meetings; also enables reads | `Calendars.ReadWrite` |
+| `tasks-read` | Read Microsoft To Do lists/tasks | `Tasks.Read` |
+| `tasks-write` | Create, update, complete, or delete tasks; also enables reads | `Tasks.ReadWrite` |
+| `onedrive-read` | List, search, inspect, or download OneDrive content | `Files.Read` |
+| `onedrive-write` | Upload, create, move, rename, or delete OneDrive content; also enables reads | `Files.ReadWrite` |
+| Login-only | Receive a reusable refresh token during login | `offline_access` |
 
 `*.ReadWrite` permissions include the corresponding reads, so selecting both
 read and write for the same feature is unnecessary.
+
+Permissions are enforced in three independent layers:
+
+1. the plugin registers only tools enabled by its configured `features`;
+2. the broker rejects scopes outside its own `M365_FEATURES` allowlist before
+   contacting Microsoft;
+3. Microsoft issues tokens only for delegated scopes actually consented by the
+   signed-in account.
+
+Configure the same feature list in the plugin and broker. The broker does not
+trust the plugin's list, and neither configuration can expand Microsoft consent.
+Unknown features and unrecognized broker scopes fail closed.
 
 > **Azure permission configuration is not consent.** Adding a delegated
 > permission in Azure does not grant the account access by itself. Re-run
@@ -198,6 +216,7 @@ confidential clients, see
 | `tenant` | `M365_TENANT`, fallback `OUTLOOK_TENANT`, then `consumers` | OAuth tenant such as `consumers`, `common`, or a tenant ID |
 | `tokenBrokerUrl` | `M365_TOKEN_BROKER_URL`, fallback `OUTLOOK_TOKEN_BROKER_URL` | Broker `/token` URL |
 | `tokenBrokerSecret` | `M365_TOKEN_BROKER_SECRET`, fallback `OUTLOOK_TOKEN_BROKER_SECRET` | Broker bearer secret |
+| `features` | `M365_FEATURES`, fallback `OUTLOOK_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Enabled tool capabilities; use the same list in the broker |
 | `personalCalendarNames` | `M365_PERSONAL_CALENDAR_NAMES`, fallback `OUTLOOK_PERSONAL_CALENDAR_NAMES` | Extra comma-separated personal calendar names |
 | `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES`, fallback `OUTLOOK_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
 
@@ -219,6 +238,9 @@ All existing names remain unchanged:
   `outlook_update_task`, `outlook_complete_task`, `outlook_delete_task`
 
 ### OneDrive tools
+
+These tools are hidden by default. Enable `onedrive-read` for the read tools or
+`onedrive-write` for both read and write tools, in both plugin and broker config.
 
 OneDrive accepts item IDs or drive-root-relative paths. Parameters that offer
 both forms reject ambiguous requests containing both.

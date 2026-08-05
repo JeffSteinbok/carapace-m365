@@ -30,17 +30,17 @@ function mockHttpsSeq(...responses: Array<[string, number]>) {
 }
 
 interface ToolDef { name: string; parameters: { properties: Record<string, unknown> }; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }
-function makeApi() {
+function makeApi(pluginConfig: Record<string, unknown> = {}) {
   const tools: Record<string, ToolDef> = {};
-  return { pluginConfig: {}, registerTool(t: unknown) { tools[(t as ToolDef).name] = t as ToolDef; }, tools };
+  return { pluginConfig, registerTool(t: unknown) { tools[(t as ToolDef).name] = t as ToolDef; }, tools };
 }
 function resultText(r: unknown) { return JSON.parse((r as { content: Array<{ text: string }> }).content[0].text); }
 
 // Re-import fresh module each time to avoid mock state bleed between tests.
-async function loadPlugin() {
+async function loadPlugin(pluginConfig: Record<string, unknown> = {}) {
   const { createEntry } = await import("../src/index.js");
   const entry = createEntry();
-  const api = makeApi();
+  const api = makeApi(pluginConfig);
   entry.register(api);
   return { entry, api };
 }
@@ -106,6 +106,8 @@ beforeEach(() => {
   delete process.env.M365_TOKEN_BROKER_URL;
   delete process.env.M365_TOKEN_BROKER_SECRET;
   delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
+  delete process.env.M365_FEATURES;
+  delete process.env.OUTLOOK_FEATURES;
   process.env.OUTLOOK_CLIENT_ID = "cid";
   process.env.OUTLOOK_CLIENT_SECRET = "csec";
   process.env.OUTLOOK_REFRESH_TOKEN = `rtoken-${testTokenSequence++}`;
@@ -125,9 +127,9 @@ describe("plugin entry", () => {
     expect(entry.name).toBe("Microsoft 365");
   });
 
-  it("registers all Outlook and OneDrive tools", async () => {
-    const { api } = await loadPlugin();
-    expect(Object.keys(api.tools).sort()).toEqual([
+  it("keeps every possible tool in the manifest contract", async () => {
+    const { entry } = await loadPlugin();
+    expect(entry.contracts?.tools.sort()).toEqual([
       "onedrive_create_folder",
       "onedrive_delete",
       "onedrive_download",
@@ -158,6 +160,78 @@ describe("plugin entry", () => {
       "outlook_update_event",
       "outlook_update_task",
     ]);
+  });
+
+  it("preserves Outlook defaults while hiding OneDrive tools", async () => {
+    const { api } = await loadPlugin();
+    expect(Object.keys(api.tools).sort()).toEqual([
+      "outlook_calendar_fetch",
+      "outlook_complete_task",
+      "outlook_create_event",
+      "outlook_create_task",
+      "outlook_delete_event",
+      "outlook_delete_task",
+      "outlook_flag",
+      "outlook_forward",
+      "outlook_inbox",
+      "outlook_meeting",
+      "outlook_move",
+      "outlook_query_events",
+      "outlook_read",
+      "outlook_reply",
+      "outlook_save_attachments",
+      "outlook_search",
+      "outlook_send",
+      "outlook_task_lists",
+      "outlook_tasks",
+      "outlook_update_event",
+      "outlook_update_task",
+    ]);
+  });
+
+  it("registers only read tools for a read-only feature", async () => {
+    const { api } = await loadPlugin({ features: ["onedrive-read"] });
+    expect(Object.keys(api.tools).sort()).toEqual([
+      "onedrive_download",
+      "onedrive_list",
+      "onedrive_metadata",
+      "onedrive_search",
+    ]);
+  });
+
+  it("registers read and write tools when a write feature is selected", async () => {
+    const { api } = await loadPlugin({ features: ["onedrive-write"] });
+    expect(Object.keys(api.tools).sort()).toEqual([
+      "onedrive_create_folder",
+      "onedrive_delete",
+      "onedrive_download",
+      "onedrive_list",
+      "onedrive_metadata",
+      "onedrive_move",
+      "onedrive_search",
+      "onedrive_upload",
+    ]);
+  });
+
+  it("does not let mail-send expose unrelated Outlook tools", async () => {
+    const { api } = await loadPlugin({ features: ["mail-send"] });
+    expect(Object.keys(api.tools).sort()).toEqual([
+      "outlook_forward",
+      "outlook_reply",
+      "outlook_send",
+    ]);
+  });
+
+  it("uses M365_FEATURES and rejects unknown feature names", async () => {
+    process.env.M365_FEATURES = "tasks-read";
+    const { api } = await loadPlugin();
+    expect(Object.keys(api.tools).sort()).toEqual([
+      "outlook_task_lists",
+      "outlook_tasks",
+    ]);
+    await expect(loadPlugin({ features: ["unknown"] })).rejects.toThrow(
+      "Unknown Microsoft 365 feature(s): unknown",
+    );
   });
 });
 

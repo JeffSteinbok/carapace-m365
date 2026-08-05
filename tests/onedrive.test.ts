@@ -15,7 +15,7 @@ let tokenSequence = 0;
 function makeApi() {
   const tools: Record<string, ToolDef> = {};
   return {
-    pluginConfig: {},
+    pluginConfig: { features: ["onedrive-write"] },
     registerTool(tool: unknown) {
       tools[(tool as ToolDef).name] = tool as ToolDef;
     },
@@ -77,7 +77,9 @@ beforeEach(() => {
   delete process.env.M365_TOKEN_BROKER_URL;
   delete process.env.M365_TOKEN_BROKER_SECRET;
   delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
+  delete process.env.M365_FEATURES;
   delete process.env.OUTLOOK_DIRECT_TOKEN_STATE_PATH;
+  delete process.env.OUTLOOK_FEATURES;
   const sequence = tokenSequence++;
   process.env.OUTLOOK_CLIENT_ID = "client";
   process.env.OUTLOOK_REFRESH_TOKEN = `onedrive-refresh-${sequence}`;

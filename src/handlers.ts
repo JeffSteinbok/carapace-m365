@@ -6,6 +6,12 @@
  */
 
 import https from "node:https";
+import { createHash } from "node:crypto";
+import {
+  GraphTokenManager,
+  type GraphTokenManagerOptions,
+} from "@carapace/m365-graph-auth";
+import { DirectTokenStateStore } from "./direct-token-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,6 +21,10 @@ export interface OutlookCalendarConfig {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  tenant: string;
+  tokenBrokerUrl: string;
+  tokenBrokerSecret: string;
+  directTokenStatePath: string;
   personalCalendarNames: string[];
   familyCalendarNames: string[];
 }
@@ -23,8 +33,16 @@ export interface OutlookCalendarConfig {
 // Constants
 // ---------------------------------------------------------------------------
 
-const TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+const SCOPES = {
+  calendarRead: ["Calendars.Read"],
+  calendarWrite: ["Calendars.ReadWrite"],
+  mailRead: ["Mail.Read"],
+  mailSend: ["Mail.Send"],
+  mailWrite: ["Mail.ReadWrite"],
+  tasksRead: ["Tasks.Read"],
+  tasksWrite: ["Tasks.ReadWrite"],
+} as const;
 const CALENDAR_DEFAULTS: Record<string, string[]> = {
   personal: ["calendar", "personal"],
   family: ["family v2", "your family", "family"],
@@ -34,15 +52,6 @@ const TASK_LIST_DEFAULTS = ["tasks", "to do"];
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
-
-function httpPost(url: string, body: string, headers: Record<string, string>): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, { method: "POST", headers, timeout: 30_000 }, res => {
-      let data = ""; res.on("data", (c: Buffer) => data += c); res.on("end", () => resolve(data));
-    });
-    req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); }); req.write(body); req.end();
-  });
-}
 
 function httpGet(url: string, token: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -102,38 +111,80 @@ function httpPostJson(
 // Token / Graph
 // ---------------------------------------------------------------------------
 
-async function getAccessToken(clientId: string, clientSecret: string, refreshToken: string): Promise<string> {
-  const params: Record<string, string> = {
-    client_id: clientId,
-    refresh_token: refreshToken,
-    grant_type: "refresh_token",
-    scope: "Calendars.ReadWrite Mail.ReadWrite Mail.Send Tasks.ReadWrite offline_access",
-  };
-  // Public-client (PKCE) registrations have no secret; only send it when present
-  // so the same code path serves both confidential and public clients.
-  if (clientSecret) params.client_secret = clientSecret;
-  const body = new URLSearchParams(params).toString();
-  const res = await httpPost(TOKEN_URL, body, { "Content-Type": "application/x-www-form-urlencoded" });
-  const parsed = JSON.parse(res);
-  if (parsed.error) throw new Error(`Token error: ${parsed.error_description ?? parsed.error}`);
-  return parsed.access_token;
+const tokenManagers = new Map<string, GraphTokenManager>();
+
+function getAuthConfigError(config: OutlookCalendarConfig): string | undefined {
+  if (config.tokenBrokerUrl) {
+    return config.tokenBrokerSecret
+      ? undefined
+      : "M365_TOKEN_BROKER_SECRET must be set when a token broker is configured";
+  }
+  if (!config.clientId) {
+    return "Set M365_CLIENT_ID and M365_REFRESH_TOKEN (OUTLOOK_* aliases are also supported), or configure the token broker";
+  }
+  return undefined;
 }
 
-function httpPostEmpty(url: string, token: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Length": "0" },
-      timeout: 30_000,
-    }, res => {
-      res.resume();
-      res.on("end", () => {
-        if ((res.statusCode ?? 0) >= 400) reject(new Error(`HTTP ${res.statusCode}`));
-        else resolve();
-      });
-    });
-    req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); }); req.end();
-  });
+function tokenManagerKey(config: OutlookCalendarConfig): string {
+  const mode = config.tokenBrokerUrl ? "broker" : "direct";
+  const identity = config.tokenBrokerUrl
+    ? {
+        tokenBrokerUrl: config.tokenBrokerUrl,
+        tokenBrokerSecret: config.tokenBrokerSecret,
+      }
+    : {
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        tenant: config.tenant,
+        directTokenStatePath: config.directTokenStatePath,
+      };
+  const digest = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  return `${mode}:${digest}`;
+}
+
+function getTokenManager(config: OutlookCalendarConfig): GraphTokenManager {
+  const key = tokenManagerKey(config);
+  let manager = tokenManagers.get(key);
+  if (!manager) {
+    let options: GraphTokenManagerOptions;
+    if (config.tokenBrokerUrl) {
+      options = {
+        tokenBrokerUrl: config.tokenBrokerUrl,
+        tokenBrokerSecret: config.tokenBrokerSecret,
+      };
+    } else {
+      const store = new DirectTokenStateStore(config.directTokenStatePath);
+      const persistedToken = store.load().refreshToken;
+      const refreshToken = persistedToken || config.refreshToken;
+      if (!refreshToken) {
+        throw new Error(
+          "Set M365_REFRESH_TOKEN or OUTLOOK_REFRESH_TOKEN, or configure the token broker",
+        );
+      }
+      if (!persistedToken) store.save({ refreshToken });
+      options = {
+        clientId: config.clientId,
+        clientSecret: config.clientSecret || undefined,
+        refreshToken,
+        tenant: config.tenant,
+        onRefreshToken: async (rotatedToken) => {
+          store.save({ refreshToken: rotatedToken });
+        },
+      };
+    }
+    manager = new GraphTokenManager(options);
+    tokenManagers.set(key, manager);
+  }
+  return manager;
+}
+
+export async function getGraphAccessToken(
+  config: OutlookCalendarConfig,
+  scopes: readonly string[],
+): Promise<string> {
+  const configError = getAuthConfigError(config);
+  if (configError) throw new Error(configError);
+  return getTokenManager(config).getAccessToken(scopes);
 }
 
 function httpPatch(url: string, body: string, token: string): Promise<string> {
@@ -332,13 +383,11 @@ export async function fetchCalendar(
   config: OutlookCalendarConfig,
   params: { calendar?: string; days?: number },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
-  }
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   const calendar = params.calendar ?? "all";
   const days = params.days ?? 7;
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.calendarRead);
   const calData = await graphGet(token, "/me/calendars?$select=id,name&$top=50") as { value: Array<{ name: string; id: string }> };
   const calMap: Record<string, string> = {};
   for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
@@ -374,15 +423,13 @@ export async function createEvent(
   config: OutlookCalendarConfig,
   params: CreateEventParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
-  }
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   if (!params.subject) return { error: "subject is required" };
   if (!params.start) return { error: "start is required" };
 
   const timezone = params.timezone ?? "America/Los_Angeles";
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
 
   // Resolve end time
   let endIso: string;
@@ -453,13 +500,11 @@ export async function updateEvent(
   config: OutlookCalendarConfig,
   params: UpdateEventParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
-  }
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   if (!params.event_id) return { error: "event_id is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
   const patch: Record<string, unknown> = {};
 
   const timezone = params.timezone ?? "America/Los_Angeles";
@@ -531,13 +576,11 @@ export async function deleteEvent(
   config: OutlookCalendarConfig,
   params: DeleteEventParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
-  }
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   if (!params.event_id) return { error: "event_id is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
   const res = await httpRequest("DELETE", `${GRAPH_BASE}/me/events/${params.event_id}`, token);
   if (res.status === 204) return { success: true, event_id: params.event_id };
   if (res.status < 200 || res.status >= 300) {
@@ -568,18 +611,21 @@ export async function createMeeting(
   config: OutlookCalendarConfig,
   params: CreateMeetingParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
+  if (!params.subject?.trim()) return { error: "subject is required" };
+  if (!params.start?.trim()) return { error: "start is required" };
+  const toList = Array.isArray(params.to) ? params.to : [params.to];
+  if (!toList.length || !toList.some((address) => address?.trim())) {
+    return { error: "to is required" };
   }
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
   const tz = params.timezone ?? "America/Los_Angeles";
   const start = toGraphDateTime(params.start, tz);
   const endDt = params.end
     ? toGraphDateTime(params.end, tz)
     : { dateTime: addMinutes(params.start, parseDurationMinutes(params.duration ?? "1h")), timeZone: tz };
 
-  const toList = Array.isArray(params.to) ? params.to : [params.to];
   const ccList = params.cc ?? [];
   const attendees = [
     ...toList.map(e => ({ emailAddress: { address: e }, type: "required" })),
@@ -630,11 +676,9 @@ export async function queryEvents(
   config: OutlookCalendarConfig,
   params: QueryEventsParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId || !refreshToken) {
-    return { error: "OUTLOOK_CLIENT_ID and OUTLOOK_REFRESH_TOKEN must be set" };
-  }
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.calendarRead);
 
   const esc = (s: string) => s.replace(/'/g, "''");
 
@@ -670,9 +714,9 @@ export async function getInbox(
   config: OutlookMailConfig,
   params: { limit?: number; unread?: boolean; folder?: string },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailRead);
   const limit = params.limit ?? 10;
   const folder = params.folder ?? "inbox";
   let path = `/me/mailFolders/${encodeURIComponent(folder)}/messages?$top=${limit}&$select=subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview&$orderby=receivedDateTime%20desc`;
@@ -685,9 +729,9 @@ export async function searchMail(
   config: OutlookMailConfig,
   params: { query?: string; from?: string; subject?: string; since?: string; before?: string; limit?: number },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailRead);
   const limit = params.limit ?? 10;
   const filters: string[] = [];
   if (params.from) filters.push(`from/emailAddress/address eq '${esc(String(params.from))}'`);
@@ -704,11 +748,11 @@ export async function readMessage(
   config: OutlookMailConfig,
   params: { message_id: string },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailRead);
   const data = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}`) as Record<string, unknown>;
   const body = (data.body as Record<string, string> | undefined);
   return { ...formatMessage(data), body: body?.content ?? "", content_type: body?.contentType ?? "" };
@@ -720,13 +764,13 @@ export async function saveAttachments(
 ): Promise<unknown> {
   const { default: fs } = await import("node:fs");
   const { default: path } = await import("node:path");
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
   const msgId = params.message_id?.trim();
   const outputDir = params.output_dir?.trim();
   if (!msgId) return { error: "message_id is required" };
   if (!outputDir) return { error: "output_dir is required" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailRead);
   const filters = params.content_types ?? ["image/*"];
   fs.mkdirSync(outputDir, { recursive: true });
   const attData = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}/attachments`) as { value: Array<Record<string, unknown>> };
@@ -762,14 +806,14 @@ export async function sendMessage(
     references?: string;
   },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   if (!params.subject?.trim()) return { error: "subject is required" };
   if (!params.body?.trim()) return { error: "body is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
   const toList = Array.isArray(params.to) ? params.to : [params.to];
-  if (!toList.length) return { error: "to is required" };
+  if (!toList.length || !toList.some((address) => address?.trim())) return { error: "to is required" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailSend);
 
   const bodyText = params.signature ? `${params.body}\n\n${params.signature}` : params.body;
   const message: Record<string, unknown> = {
@@ -799,13 +843,11 @@ export async function sendMessage(
     message.attachments = attachments;
   }
 
-  // Create draft message then send it
-  const createRes = await graphPost(token, "/me/messages", message) as Record<string, unknown>;
-  if (createRes.error) return { error: JSON.stringify(createRes.error) };
-  const msgId = String(createRes.id ?? "");
-  if (!msgId) return { error: "Failed to create draft message" };
-
-  await httpPostEmpty(`${GRAPH_BASE}/me/messages/${encodeURIComponent(msgId)}/send`, token);
+  const sendRes = await graphPost(token, "/me/sendMail", {
+    message,
+    saveToSentItems: true,
+  }) as Record<string, unknown>;
+  if (sendRes.error) return { error: JSON.stringify(sendRes.error) };
 
   const attNote = params.attachment?.length ? ` (${params.attachment.length} attachment(s))` : "";
   return { ok: true, message: `✓ Sent to ${toList.join(", ")}: ${params.subject}${attNote}` };
@@ -820,13 +862,13 @@ export async function replyToMessage(
     signature?: string;
   },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   if (!params.body?.trim()) return { error: "body is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailSend);
   const bodyText = params.signature ? `${params.body}\n\n${params.signature}` : params.body;
   const endpoint = params.reply_all
     ? `/me/messages/${encodeURIComponent(msgId)}/replyAll`
@@ -849,14 +891,14 @@ export async function forwardMessage(
     comment?: string;
   },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   const toList = Array.isArray(params.to) ? params.to : [params.to];
-  if (!toList.length) return { error: "to is required" };
+  if (!toList.length || !toList.some((address) => address?.trim())) return { error: "to is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailSend);
   const payload: Record<string, unknown> = {
     toRecipients: toList.map(e => ({ emailAddress: { address: e.trim() } })),
   };
@@ -871,13 +913,13 @@ export async function moveMessage(
   config: OutlookMailConfig,
   params: { message_id: string; destination_folder: string },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   if (!params.destination_folder?.trim()) return { error: "destination_folder is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
   const res = await graphPost(token, `/me/messages/${encodeURIComponent(msgId)}/move`, { destinationId: params.destination_folder }) as Record<string, unknown>;
   if (res.error) return { error: JSON.stringify(res.error) };
   return { ok: true, new_id: res.id ?? null };
@@ -887,12 +929,12 @@ export async function flagMessage(
   config: OutlookMailConfig,
   params: { message_id: string; flag_status: "flagged" | "complete" | "notFlagged" },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
   const res = await graphPatch(token, `/me/messages/${encodeURIComponent(msgId)}`, { flag: { flagStatus: params.flag_status } }) as Record<string, unknown>;
   if (res.error) return { error: JSON.stringify(res.error) };
   return { ok: true, flag_status: params.flag_status };
@@ -909,9 +951,9 @@ export interface ListTasksParams {
 export async function listTaskListsHandler(
   config: OutlookMailConfig,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.tasksRead);
   const lists = await listTaskLists(token);
   return {
     count: lists.length,
@@ -927,9 +969,9 @@ export async function listTasks(
   config: OutlookMailConfig,
   params: { task_list?: string; include_completed?: boolean; limit?: number },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.tasksRead);
   const resolved = await resolveTaskList(token, params.task_list);
   const data = await graphGet(token, `/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks?$top=100`) as { value: Array<Record<string, unknown>> };
   let tasks = (data.value ?? []).map(formatTask);
@@ -958,10 +1000,10 @@ export async function createTask(
   config: OutlookMailConfig,
   params: CreateTaskParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   if (!params.title?.trim()) return { error: "title is required" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.tasksWrite);
   const resolved = await resolveTaskList(token, params.task_list);
   const payload: Record<string, unknown> = { title: params.title.trim() };
   if (params.notes) payload.body = { contentType: "text", content: params.notes };
@@ -993,10 +1035,10 @@ export async function updateTask(
   config: OutlookMailConfig,
   params: UpdateTaskParams,
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   if (!params.task_id?.trim()) return { error: "task_id is required" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.tasksWrite);
   const resolved = await resolveTaskList(token, params.task_list);
   const payload: Record<string, unknown> = {};
   if (params.title !== undefined) payload.title = params.title.trim();
@@ -1031,10 +1073,10 @@ export async function deleteTask(
   config: OutlookMailConfig,
   params: { task_id: string; task_list?: string },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
   if (!params.task_id?.trim()) return { error: "task_id is required" };
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.tasksWrite);
   const resolved = await resolveTaskList(token, params.task_list);
   const res = await httpRequest(
     "DELETE",

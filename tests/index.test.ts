@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import https from "node:https";
 import { EventEmitter } from "node:events";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
-afterEach(() => vi.restoreAllMocks());
+const scratch = resolve("tests", ".test-state");
+let directTokenStatePath = "";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  rmSync(scratch, { recursive: true, force: true });
+});
 
 function mockHttpsSeq(...responses: Array<[string, number]>) {
   const spy = vi.spyOn(https, "request");
@@ -18,6 +26,7 @@ function mockHttpsSeq(...responses: Array<[string, number]>) {
       return req as unknown as ReturnType<typeof https.request>;
     });
   }
+  return spy;
 }
 
 interface ToolDef { name: string; parameters: { properties: Record<string, unknown> }; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }
@@ -87,10 +96,22 @@ const TASK_CREATED = JSON.stringify({
   body: { contentType: "text", content: "Whole milk" },
 });
 
+let testTokenSequence = 0;
+
 beforeEach(() => {
+  delete process.env.M365_CLIENT_ID;
+  delete process.env.M365_CLIENT_SECRET;
+  delete process.env.M365_REFRESH_TOKEN;
+  delete process.env.M365_TENANT;
+  delete process.env.M365_TOKEN_BROKER_URL;
+  delete process.env.M365_TOKEN_BROKER_SECRET;
+  delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
   process.env.OUTLOOK_CLIENT_ID = "cid";
   process.env.OUTLOOK_CLIENT_SECRET = "csec";
-  process.env.OUTLOOK_REFRESH_TOKEN = "rtoken";
+  process.env.OUTLOOK_REFRESH_TOKEN = `rtoken-${testTokenSequence++}`;
+  process.env.OUTLOOK_TENANT = "consumers";
+  directTokenStatePath = resolve(scratch, `direct-${testTokenSequence}.json`);
+  process.env.OUTLOOK_DIRECT_TOKEN_STATE_PATH = directTokenStatePath;
 });
 
 // ---------------------------------------------------------------------------
@@ -101,12 +122,20 @@ describe("plugin entry", () => {
   it("has correct id and name", async () => {
     const { entry } = await loadPlugin();
     expect(entry.id).toBe("outlook");
-    expect(entry.name).toBe("Outlook");
+    expect(entry.name).toBe("Microsoft 365");
   });
 
-  it("registers all 21 tools", async () => {
+  it("registers all Outlook and OneDrive tools", async () => {
     const { api } = await loadPlugin();
     expect(Object.keys(api.tools).sort()).toEqual([
+      "onedrive_create_folder",
+      "onedrive_delete",
+      "onedrive_download",
+      "onedrive_list",
+      "onedrive_metadata",
+      "onedrive_move",
+      "onedrive_search",
+      "onedrive_upload",
       "outlook_calendar_fetch",
       "outlook_complete_task",
       "outlook_create_event",
@@ -138,11 +167,11 @@ describe("plugin entry", () => {
 
 describe("outlook_inbox", () => {
   it("returns error when credentials missing", async () => {
-    delete process.env.OUTLOOK_CLIENT_ID;
+    delete process.env.OUTLOOK_REFRESH_TOKEN;
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_inbox"].execute("id", {}));
     expect(data).toHaveProperty("error");
-    process.env.OUTLOOK_CLIENT_ID = "cid";
+    process.env.OUTLOOK_REFRESH_TOKEN = "rtoken-restored";
   });
 
   it("returns inbox messages", async () => {
@@ -151,6 +180,64 @@ describe("outlook_inbox", () => {
     const data = resultText(await api.tools["outlook_inbox"].execute("id", { limit: 10 })) as Record<string, unknown>;
     expect(data.count).toBe(2);
     expect((data.messages as Array<Record<string, unknown>>)[0].subject).toBe("Hello");
+  });
+
+  it("prefers a persisted direct-mode refresh token", async () => {
+    mkdirSync(dirname(directTokenStatePath), { recursive: true });
+    writeFileSync(
+      directTokenStatePath,
+      `${JSON.stringify({ refreshToken: "persisted-refresh" })}\n`,
+      "utf8",
+    );
+    const spy = mockHttpsSeq([TOKEN, 200], [MESSAGES, 200]);
+
+    const { api } = await loadPlugin();
+    await api.tools["outlook_inbox"].execute("id", {});
+
+    const tokenRequest = spy.mock.results[0]?.value as {
+      write: ReturnType<typeof vi.fn>;
+    };
+    expect(String(tokenRequest.write.mock.calls[0]?.[0])).toContain(
+      "refresh_token=persisted-refresh",
+    );
+    expect(String(tokenRequest.write.mock.calls[0]?.[0])).not.toContain(
+      process.env.OUTLOOK_REFRESH_TOKEN,
+    );
+  });
+
+  it("atomically persists direct-mode refresh-token rotation", async () => {
+    mockHttpsSeq([
+      JSON.stringify({
+        access_token: "test-token",
+        expires_in: 3600,
+        refresh_token: "rotated-refresh",
+      }),
+      200,
+    ], [MESSAGES, 200]);
+
+    const { api } = await loadPlugin();
+    await api.tools["outlook_inbox"].execute("id", {});
+
+    expect(JSON.parse(readFileSync(directTokenStatePath, "utf8"))).toEqual({
+      refreshToken: "rotated-refresh",
+    });
+  });
+
+  it("does not read or write direct-token state in broker mode", async () => {
+    mkdirSync(dirname(directTokenStatePath), { recursive: true });
+    writeFileSync(directTokenStatePath, "not valid json", "utf8");
+    delete process.env.OUTLOOK_REFRESH_TOKEN;
+    process.env.M365_TOKEN_BROKER_URL = "https://broker.example.test/token";
+    process.env.M365_TOKEN_BROKER_SECRET = "broker-secret";
+    mockHttpsSeq([TOKEN, 200], [MESSAGES, 200]);
+
+    const { api } = await loadPlugin();
+    const data = resultText(
+      await api.tools["outlook_inbox"].execute("id", {}),
+    ) as Record<string, unknown>;
+
+    expect(data.count).toBe(2);
+    expect(readFileSync(directTokenStatePath, "utf8")).toBe("not valid json");
   });
 
   it("surfaces HTTP errors", async () => {
@@ -212,7 +299,7 @@ describe("outlook_send", () => {
   });
 
   it("sends a message and returns success", async () => {
-    mockHttpsSeq([TOKEN, 200], [JSON.stringify({ id: "draft-1" }), 201], ["", 202]);
+    mockHttpsSeq([TOKEN, 200], ["", 202]);
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_send"].execute("id", {
       to: "octo@steinbok.net",
@@ -252,11 +339,11 @@ describe("outlook_reply", () => {
 
 describe("outlook_calendar_fetch", () => {
   it("returns error when credentials missing", async () => {
-    delete process.env.OUTLOOK_CLIENT_ID;
+    delete process.env.OUTLOOK_REFRESH_TOKEN;
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_calendar_fetch"].execute("id", {}));
     expect(data).toHaveProperty("error");
-    process.env.OUTLOOK_CLIENT_ID = "cid";
+    process.env.OUTLOOK_REFRESH_TOKEN = "rtoken-restored";
   });
 
   it("returns calendar events", async () => {

@@ -107,13 +107,12 @@ beforeEach(() => {
   delete process.env.M365_TOKEN_BROKER_SECRET;
   delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
   delete process.env.M365_FEATURES;
-  delete process.env.OUTLOOK_FEATURES;
-  process.env.OUTLOOK_CLIENT_ID = "cid";
-  process.env.OUTLOOK_CLIENT_SECRET = "csec";
-  process.env.OUTLOOK_REFRESH_TOKEN = `rtoken-${testTokenSequence++}`;
-  process.env.OUTLOOK_TENANT = "consumers";
+  process.env.M365_CLIENT_ID = "cid";
+  process.env.M365_CLIENT_SECRET = "csec";
+  process.env.M365_REFRESH_TOKEN = `rtoken-${testTokenSequence++}`;
+  process.env.M365_TENANT = "consumers";
   directTokenStatePath = resolve(scratch, `direct-${testTokenSequence}.json`);
-  process.env.OUTLOOK_DIRECT_TOKEN_STATE_PATH = directTokenStatePath;
+  process.env.M365_DIRECT_TOKEN_STATE_PATH = directTokenStatePath;
 });
 
 // ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ beforeEach(() => {
 describe("plugin entry", () => {
   it("has correct id and name", async () => {
     const { entry } = await loadPlugin();
-    expect(entry.id).toBe("outlook");
+    expect(entry.id).toBe("m365");
     expect(entry.name).toBe("Microsoft 365");
   });
 
@@ -241,11 +240,11 @@ describe("plugin entry", () => {
 
 describe("outlook_inbox", () => {
   it("returns error when credentials missing", async () => {
-    delete process.env.OUTLOOK_REFRESH_TOKEN;
+    delete process.env.M365_REFRESH_TOKEN;
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_inbox"].execute("id", {}));
     expect(data).toHaveProperty("error");
-    process.env.OUTLOOK_REFRESH_TOKEN = "rtoken-restored";
+    process.env.M365_REFRESH_TOKEN = "rtoken-restored";
   });
 
   it("returns inbox messages", async () => {
@@ -275,7 +274,7 @@ describe("outlook_inbox", () => {
       "refresh_token=persisted-refresh",
     );
     expect(String(tokenRequest.write.mock.calls[0]?.[0])).not.toContain(
-      process.env.OUTLOOK_REFRESH_TOKEN,
+      process.env.M365_REFRESH_TOKEN,
     );
   });
 
@@ -300,7 +299,7 @@ describe("outlook_inbox", () => {
   it("does not read or write direct-token state in broker mode", async () => {
     mkdirSync(dirname(directTokenStatePath), { recursive: true });
     writeFileSync(directTokenStatePath, "not valid json", "utf8");
-    delete process.env.OUTLOOK_REFRESH_TOKEN;
+    delete process.env.M365_REFRESH_TOKEN;
     process.env.M365_TOKEN_BROKER_URL = "https://broker.example.test/token";
     process.env.M365_TOKEN_BROKER_SECRET = "broker-secret";
     mockHttpsSeq([TOKEN, 200], [MESSAGES, 200]);
@@ -413,11 +412,11 @@ describe("outlook_reply", () => {
 
 describe("outlook_calendar_fetch", () => {
   it("returns error when credentials missing", async () => {
-    delete process.env.OUTLOOK_REFRESH_TOKEN;
+    delete process.env.M365_REFRESH_TOKEN;
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_calendar_fetch"].execute("id", {}));
     expect(data).toHaveProperty("error");
-    process.env.OUTLOOK_REFRESH_TOKEN = "rtoken-restored";
+    process.env.M365_REFRESH_TOKEN = "rtoken-restored";
   });
 
   it("returns calendar events", async () => {

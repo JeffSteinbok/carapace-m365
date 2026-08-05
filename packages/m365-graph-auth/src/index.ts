@@ -247,10 +247,10 @@ export class GraphTokenManager {
 
   private async refreshDirectly(scopes: string[]): Promise<AccessToken> {
     if (!this.options.clientId) {
-      throw new Error("M365_CLIENT_ID or OUTLOOK_CLIENT_ID must be set for direct token refresh");
+      throw new Error("M365_CLIENT_ID must be set for direct token refresh");
     }
     if (!this.refreshToken) {
-      throw new Error("M365_REFRESH_TOKEN or OUTLOOK_REFRESH_TOKEN must be set for direct token refresh");
+      throw new Error("M365_REFRESH_TOKEN must be set for direct token refresh");
     }
     const params: Record<string, string> = {
       client_id: this.options.clientId,

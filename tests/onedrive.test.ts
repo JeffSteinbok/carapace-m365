@@ -78,13 +78,13 @@ beforeEach(() => {
   delete process.env.M365_TOKEN_BROKER_SECRET;
   delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
   delete process.env.M365_FEATURES;
-  delete process.env.OUTLOOK_DIRECT_TOKEN_STATE_PATH;
-  delete process.env.OUTLOOK_FEATURES;
+  delete process.env.M365_DIRECT_TOKEN_STATE_PATH;
+  delete process.env.M365_FEATURES;
   const sequence = tokenSequence++;
-  process.env.OUTLOOK_CLIENT_ID = "client";
-  process.env.OUTLOOK_REFRESH_TOKEN = `onedrive-refresh-${sequence}`;
-  process.env.OUTLOOK_TENANT = "consumers";
-  process.env.OUTLOOK_DIRECT_TOKEN_STATE_PATH = join(
+  process.env.M365_CLIENT_ID = "client";
+  process.env.M365_REFRESH_TOKEN = `onedrive-refresh-${sequence}`;
+  process.env.M365_TENANT = "consumers";
+  process.env.M365_DIRECT_TOKEN_STATE_PATH = join(
     scratch,
     `direct-token-${sequence}.json`,
   );

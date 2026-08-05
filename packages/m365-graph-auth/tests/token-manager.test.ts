@@ -19,7 +19,7 @@ function response(body: Record<string, unknown>, status = 200): HttpResponse {
 }
 
 describe("Microsoft 365 feature policy", () => {
-  it("strictly normalizes features and preserves backward-compatible defaults", () => {
+  it("strictly normalizes features and preserves the default feature set", () => {
     expect(parseM365Features(undefined)).toEqual(DEFAULT_M365_FEATURES);
     expect(parseM365Features(" MAIL-READ,mail-read,OneDrive-Write ")).toEqual([
       "mail-read",

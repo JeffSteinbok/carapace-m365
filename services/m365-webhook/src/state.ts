@@ -14,9 +14,12 @@ export interface M365WebhookState {
   expirationDateTime?: string;
   notificationUrl?: string;
   clientState?: string;
+  processedNotificationIds?: string[];
 }
 
 export class StateStore {
+  private readonly inFlightNotificationIds = new Set<string>();
+
   constructor(private readonly path: string) {}
 
   load(): M365WebhookState {
@@ -53,5 +56,24 @@ export class StateStore {
     } catch {
       // Best effort only where restrictive permissions are supported.
     }
+  }
+
+  claimNotification(id: string): boolean {
+    if (this.inFlightNotificationIds.has(id)) return false;
+    if (this.load().processedNotificationIds?.includes(id)) return false;
+    this.inFlightNotificationIds.add(id);
+    return true;
+  }
+
+  completeNotification(id: string): void {
+    this.inFlightNotificationIds.delete(id);
+    const state = this.load();
+    const processed = state.processedNotificationIds ?? [];
+    const updated = [...processed.filter((value) => value !== id), id].slice(-1000);
+    this.save({ ...state, processedNotificationIds: updated });
+  }
+
+  releaseNotification(id: string): void {
+    this.inFlightNotificationIds.delete(id);
   }
 }

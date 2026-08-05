@@ -147,7 +147,7 @@ export class GraphClient {
       },
     );
     if (response.status === 401) this.tokens.invalidate(MAIL_READ);
-    if (response.status !== 204) {
+    if (response.status !== 204 && response.status !== 404) {
       throw graphError("Graph subscription deletion", response);
     }
   }

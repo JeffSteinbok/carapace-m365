@@ -1,7 +1,7 @@
 # Registering your own Microsoft 365 app
 
 The current published client ID remains available, and the repository/app can be
-renamed later without changing the plugin ID. Use your own Microsoft Entra app
+renamed later without changing the plugin identity. Use your own Microsoft Entra app
 registration when you need work/school accounts, a consent screen you control,
 or a confidential-client deployment.
 
@@ -64,7 +64,7 @@ Work/school tenant policy may require administrator consent. Personal Microsoft
 accounts usually allow user consent for these delegated permissions.
 
 The default feature list is
-`calendar-write,mail-write,mail-send,tasks-write`. It preserves pre-OneDrive
+`calendar-write,mail-write,mail-send,tasks-write`. It enables the core
 behavior; OneDrive tools and broker scopes remain disabled until explicitly
 configured.
 
@@ -109,10 +109,6 @@ Use the same list in the plugin:
 }
 ```
 
-`OUTLOOK_CLIENT_ID`, `OUTLOOK_REFRESH_TOKEN`, and
-`OUTLOOK_TOKEN_BROKER_SECRET` remain accepted aliases. `OUTLOOK_FEATURES` is
-also accepted as the broker/plugin environment fallback.
-
 The list participates in three independent enforcement layers: plugin tool
 registration, the broker's authoritative scope allowlist, and Microsoft
 consent. Configure the same features in the first two layers, then consent to
@@ -146,7 +142,7 @@ grant_type=authorization_code
 scope=Mail.ReadWrite Mail.Send offline_access openid
 ```
 
-Configure `M365_CLIENT_SECRET` (or `OUTLOOK_CLIENT_SECRET`) in the broker. The
+Configure `M365_CLIENT_SECRET` in the broker. The
 shared token module omits `client_secret` entirely for public clients.
 
 ## Incremental consent and broker state

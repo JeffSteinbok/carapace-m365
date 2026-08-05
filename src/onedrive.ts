@@ -6,11 +6,19 @@ import {
   getGraphAccessToken,
   type OutlookConfig,
 } from "./handlers.js";
+import { isM365FeatureEnabled } from "@carapace/m365-graph-auth";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 export const ONEDRIVE_SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024;
+export const ONEDRIVE_DOWNLOAD_LIMIT = 100 * 1024 * 1024;
 const FILES_READ = ["Files.Read"] as const;
 const FILES_WRITE = ["Files.ReadWrite"] as const;
+
+function filesReadScopes(config: OutlookConfig): readonly ["Files.Read"] | readonly ["Files.ReadWrite"] {
+  return isM365FeatureEnabled(config.features, "onedrive-write")
+    ? FILES_WRITE
+    : FILES_READ;
+}
 
 interface GraphResponse {
   status: number;
@@ -49,8 +57,10 @@ function request(
   body?: Buffer | string,
   contentType?: string,
   redirects = 0,
+  maxResponseBytes?: number,
 ): Promise<GraphResponse> {
   return new Promise((resolveRequest, reject) => {
+    let rejected = false;
     const headers: Record<string, string> = { Accept: "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) {
@@ -59,16 +69,36 @@ function request(
     }
     const req = https.request(url, { method, headers, timeout: 30_000 }, (res) => {
       const chunks: Buffer[] = [];
+      let responseBytes = 0;
       res.on("data", (chunk: Buffer | string) => {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        if (rejected) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        responseBytes += buffer.length;
+        if (maxResponseBytes !== undefined && responseBytes > maxResponseBytes) {
+          rejected = true;
+          res.destroy();
+          req.destroy();
+          reject(new Error(`Microsoft Graph response exceeded ${maxResponseBytes} bytes`));
+          return;
+        }
+        chunks.push(buffer);
       });
       res.on("end", () => {
+        if (rejected) return;
         const status = res.statusCode ?? 0;
         const location = res.headers?.location;
         if (status >= 300 && status < 400 && location && redirects < 5) {
           const next = new URL(location, url);
           const sameOrigin = next.origin === new URL(url).origin;
-          void request("GET", next.toString(), sameOrigin ? token : "", undefined, undefined, redirects + 1)
+          void request(
+            "GET",
+            next.toString(),
+            sameOrigin ? token : "",
+            undefined,
+            undefined,
+            redirects + 1,
+            maxResponseBytes,
+          )
             .then(resolveRequest, reject);
           return;
         }
@@ -78,8 +108,13 @@ function request(
           body: Buffer.concat(chunks),
         });
       });
+      res.on("error", (error) => {
+        if (!rejected) reject(error);
+      });
     });
-    req.on("error", reject);
+    req.on("error", (error) => {
+      if (!rejected) reject(error);
+    });
     req.on("timeout", () => {
       req.destroy();
       reject(new Error("Microsoft Graph request timed out"));
@@ -219,7 +254,7 @@ export async function listOneDrive(
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
     return { error: "limit must be an integer between 1 and 200" };
   }
-  const token = await getGraphAccessToken(config, FILES_READ);
+  const token = await getGraphAccessToken(config, filesReadScopes(config));
   const separator = childrenPath(params).includes("?") ? "&" : "?";
   const data = await graphJson<{ value?: DriveItem[] }>(
     "GET",
@@ -240,7 +275,7 @@ export async function searchOneDrive(
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
     return { error: "limit must be an integer between 1 and 200" };
   }
-  const token = await getGraphAccessToken(config, FILES_READ);
+  const token = await getGraphAccessToken(config, filesReadScopes(config));
   const escaped = encodeURIComponent(query.replace(/'/g, "''"));
   const data = await graphJson<{ value?: DriveItem[] }>(
     "GET",
@@ -256,7 +291,7 @@ export async function getOneDriveMetadata(
   params: DriveAddress,
 ): Promise<unknown> {
   validateAddress(params);
-  const token = await getGraphAccessToken(config, FILES_READ);
+  const token = await getGraphAccessToken(config, filesReadScopes(config));
   const item = await graphJson<DriveItem>(
     "GET",
     `${itemPath(params)}?$select=id,name,size,webUrl,createdDateTime,lastModifiedDateTime,file,folder,parentReference`,
@@ -276,8 +311,16 @@ export async function downloadOneDriveFile(
   if (existsSync(destination) && !params.overwrite) {
     return { error: `Local file already exists: ${destination}. Set overwrite=true to replace it.` };
   }
-  const token = await getGraphAccessToken(config, FILES_READ);
-  const response = await request("GET", `${GRAPH_BASE}${itemPath(params)}/content`, token);
+  const token = await getGraphAccessToken(config, filesReadScopes(config));
+  const response = await request(
+    "GET",
+    `${GRAPH_BASE}${itemPath(params)}/content`,
+    token,
+    undefined,
+    undefined,
+    0,
+    ONEDRIVE_DOWNLOAD_LIMIT,
+  );
   if (response.status < 200 || response.status >= 300) throw graphError(response);
   await mkdir(dirname(destination), { recursive: true });
   await writeFile(destination, response.body, { flag: params.overwrite ? "w" : "wx" });

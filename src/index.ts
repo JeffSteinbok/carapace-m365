@@ -1,5 +1,5 @@
 /**
- * Outlook plugin — unified mail + calendar tools via Microsoft Graph.
+ * Microsoft 365 plugin — unified mail, calendar, tasks, and OneDrive tools via Microsoft Graph.
  */
 
 import {
@@ -55,12 +55,12 @@ import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
  * The client ID of a public client is not a secret, so it ships as the default:
  * users can run `npm run login` and consent with their own account without
  * registering their own Azure app. Override via config.clientId or
- * OUTLOOK_CLIENT_ID to point at your own registration.
+ * M365_CLIENT_ID to point at your own registration.
  */
 export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 
 const createBaseEntry = definePlugin({
-  id: "outlook",
+  id: "m365",
   name: "Microsoft 365",
   description: "Outlook mail, calendar, tasks, and OneDrive tools via Microsoft Graph",
 
@@ -74,7 +74,7 @@ const createBaseEntry = definePlugin({
     tokenBrokerSecret: Type.Optional(Type.String({ description: "Bearer secret used to authenticate to the token broker" })),
     features: Type.Optional(
       Type.Array(Type.String(), {
-        description: "Microsoft 365 features to register. Defaults preserve pre-OneDrive Outlook behavior.",
+        description: "Microsoft 365 features to register. OneDrive requires explicit enablement.",
       }),
     ),
     personalCalendarNames: Type.Optional(
@@ -693,8 +693,7 @@ function configuredFeatures(config: Record<string, unknown> | undefined): M365Fe
   if (config && Object.prototype.hasOwnProperty.call(config, "features")) {
     return parseM365Features(config.features as readonly unknown[]);
   }
-  const envFeatures = process.env.M365_FEATURES?.trim()
-    || process.env.OUTLOOK_FEATURES?.trim();
+  const envFeatures = process.env.M365_FEATURES?.trim();
   return parseM365Features(envFeatures || undefined);
 }
 
@@ -728,7 +727,7 @@ export function createEntry(): PluginEntry {
 // Config resolver
 // ---------------------------------------------------------------------------
 
-function resolveConfig(config: {
+export function resolveConfig(config: {
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string;
@@ -740,36 +739,34 @@ function resolveConfig(config: {
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
 }): OutlookCalendarConfig {
-  const env = (m365: string, outlook: string): string =>
-    process.env[m365]?.trim() || process.env[outlook]?.trim() || "";
-  const parseNames = (values: string[] | undefined, m365Key: string, outlookKey: string): string[] => {
+  const env = (name: string): string => process.env[name]?.trim() || "";
+  const parseNames = (values: string[] | undefined, key: string): string[] => {
     if (Array.isArray(values)) return values.map(n => n.trim().toLowerCase()).filter(Boolean);
-    return env(m365Key, outlookKey).split(",").map(n => n.trim().toLowerCase()).filter(Boolean);
+    return env(key).split(",").map(n => n.trim().toLowerCase()).filter(Boolean);
   };
   const brokerSecret = config.tokenBrokerSecret?.trim()
-    || env("M365_TOKEN_BROKER_SECRET", "OUTLOOK_TOKEN_BROKER_SECRET");
+    || env("M365_TOKEN_BROKER_SECRET");
   const brokerUrl = config.tokenBrokerUrl?.trim()
-    || env("M365_TOKEN_BROKER_URL", "OUTLOOK_TOKEN_BROKER_URL")
+    || env("M365_TOKEN_BROKER_URL")
     || (brokerSecret ? DEFAULT_TOKEN_BROKER_URL : "");
   return {
-    clientId: config.clientId?.trim() || env("M365_CLIENT_ID", "OUTLOOK_CLIENT_ID") || DEFAULT_CLIENT_ID,
-    clientSecret: config.clientSecret?.trim() || env("M365_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET"),
-    refreshToken: config.refreshToken?.trim() || env("M365_REFRESH_TOKEN", "OUTLOOK_REFRESH_TOKEN"),
+    clientId: config.clientId?.trim() || env("M365_CLIENT_ID") || DEFAULT_CLIENT_ID,
+    clientSecret: config.clientSecret?.trim() || env("M365_CLIENT_SECRET"),
+    refreshToken: config.refreshToken?.trim() || env("M365_REFRESH_TOKEN"),
     directTokenStatePath: config.directTokenStatePath?.trim()
-      || env("M365_DIRECT_TOKEN_STATE_PATH", "OUTLOOK_DIRECT_TOKEN_STATE_PATH")
+      || env("M365_DIRECT_TOKEN_STATE_PATH")
       || DEFAULT_DIRECT_TOKEN_STATE_PATH,
-    tenant: config.tenant?.trim() || env("M365_TENANT", "OUTLOOK_TENANT") || "consumers",
+    tenant: config.tenant?.trim() || env("M365_TENANT") || "consumers",
     tokenBrokerUrl: brokerUrl,
     tokenBrokerSecret: brokerSecret,
+    features: configuredFeatures(config),
     personalCalendarNames: parseNames(
       config.personalCalendarNames,
       "M365_PERSONAL_CALENDAR_NAMES",
-      "OUTLOOK_PERSONAL_CALENDAR_NAMES",
     ),
     familyCalendarNames: parseNames(
       config.familyCalendarNames,
       "M365_FAMILY_CALENDAR_NAMES",
-      "OUTLOOK_FAMILY_CALENDAR_NAMES",
     ),
   };
 }

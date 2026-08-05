@@ -9,6 +9,7 @@ import https from "node:https";
 import { createHash } from "node:crypto";
 import {
   GraphTokenManager,
+  isM365FeatureEnabled,
   type GraphTokenManagerOptions,
 } from "@carapace/m365-graph-auth";
 import { DirectTokenStateStore } from "./direct-token-state.js";
@@ -25,6 +26,7 @@ export interface OutlookCalendarConfig {
   tokenBrokerUrl: string;
   tokenBrokerSecret: string;
   directTokenStatePath: string;
+  features: string[];
   personalCalendarNames: string[];
   familyCalendarNames: string[];
 }
@@ -120,7 +122,7 @@ function getAuthConfigError(config: OutlookCalendarConfig): string | undefined {
       : "M365_TOKEN_BROKER_SECRET must be set when a token broker is configured";
   }
   if (!config.clientId) {
-    return "Set M365_CLIENT_ID and M365_REFRESH_TOKEN (OUTLOOK_* aliases are also supported), or configure the token broker";
+    return "Set M365_CLIENT_ID and M365_REFRESH_TOKEN, or configure the token broker";
   }
   return undefined;
 }
@@ -158,7 +160,7 @@ function getTokenManager(config: OutlookCalendarConfig): GraphTokenManager {
       const refreshToken = persistedToken || config.refreshToken;
       if (!refreshToken) {
         throw new Error(
-          "Set M365_REFRESH_TOKEN or OUTLOOK_REFRESH_TOKEN, or configure the token broker",
+          "Set M365_REFRESH_TOKEN or configure the token broker",
         );
       }
       if (!persistedToken) store.save({ refreshToken });

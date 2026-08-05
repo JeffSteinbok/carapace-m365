@@ -1,11 +1,10 @@
-# 🐚 Microsoft 365
+# 🐚 Carapace Microsoft 365
 
 Microsoft 365 tools for Outlook mail, calendars, Microsoft To Do, and OneDrive
 through Microsoft Graph.
 
-The package and repository are still named `carapace-outlook`, and the plugin ID
-remains `outlook` for compatibility. Existing `outlook_*` tools and `OUTLOOK_*`
-environment variables continue to work.
+The package is named `carapace-m365`. Outlook and OneDrive tool names remain
+brand-specific within the Microsoft 365 plugin.
 
 ## Architecture
 
@@ -13,7 +12,7 @@ The recommended deployment uses the standalone token broker included in this
 repository:
 
 ```text
-Carapace/OpenClaw plugin ── authenticated /token ──► m365-webhook
+Carapace/OpenClaw M365 plugin ── authenticated /token ──► m365-webhook
                                                      ├─ owns refresh token
                                                      ├─ persists rotation
                                                      ├─ renews Graph subscription
@@ -32,7 +31,7 @@ single-process use.
 
 ### 1. Consent only to the features you want
 
-The backward-compatible default grants the pre-OneDrive capabilities:
+The default grants the core capabilities:
 `calendar-write,mail-write,mail-send,tasks-write`. It does **not** add OneDrive,
 and OneDrive tools are not registered unless `onedrive-read` or
 `onedrive-write` is explicitly enabled.
@@ -85,7 +84,7 @@ M365_CLIENT_ID=your-app-client-id
 M365_REFRESH_TOKEN=the-token-from-login
 M365_FEATURES=calendar-write,mail-write,mail-send,tasks-write
 M365_TOKEN_BROKER_SECRET=a-long-random-secret
-M365_WEBHOOK_URL=https://your-public-host/outlook/webhook
+M365_WEBHOOK_URL=https://your-public-host/m365/webhook
 M365_WEBHOOK_CLIENT_STATE=another-long-random-secret
 NOTIFY_TARGET=your-openclaw-notification-target
 ```
@@ -97,19 +96,17 @@ node services/m365-webhook/dist/index.js
 ```
 
 The service binds to `127.0.0.1:18790` by default, exposes authenticated
-`POST /token`, and accepts Graph notifications at `/outlook/webhook`. See
+`POST /token`, and accepts Graph notifications at `/m365/webhook`. See
 [services/m365-webhook/README.md](services/m365-webhook/README.md) for proxy,
 state, deployment, and systemd details.
 
 ### 3. Configure the plugin
 
-The plugin ID intentionally remains `outlook`:
-
 ```json
 {
   "plugins": {
     "entries": {
-      "outlook": {
+      "m365": {
         "enabled": true,
         "config": {
           "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
@@ -133,7 +130,7 @@ For migration or a single process without the webhook broker:
 {
   "plugins": {
     "entries": {
-      "outlook": {
+      "m365": {
         "enabled": true,
         "config": {
           "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
@@ -152,8 +149,8 @@ Direct mode is strictly a single-process fallback. It persists the authoritative
 refresh token at `~/.openclaw/state/m365-direct-token.json` by default, using an
 atomic replacement and restrictive permissions where supported. Override the
 path with `directTokenStatePath`, `M365_DIRECT_TOKEN_STATE_PATH`, or
-`OUTLOOK_DIRECT_TOKEN_STATE_PATH`. Once present, the state token takes
-precedence over configuration and environment values. Multiple plugin
+Once present, the state token takes precedence over configuration and
+environment values. Multiple plugin
 processes must use broker mode so only one process owns refresh-token rotation.
 
 ## Least-privilege permissions
@@ -209,22 +206,20 @@ confidential clients, see
 
 | Plugin field | Environment | Purpose |
 |---|---|---|
-| `clientId` | `M365_CLIENT_ID`, fallback `OUTLOOK_CLIENT_ID` | Azure application/client ID |
-| `clientSecret` | `M365_CLIENT_SECRET`, fallback `OUTLOOK_CLIENT_SECRET` | Optional confidential-client secret |
-| `refreshToken` | `M365_REFRESH_TOKEN`, fallback `OUTLOOK_REFRESH_TOKEN` | Direct-mode refresh token |
-| `directTokenStatePath` | `M365_DIRECT_TOKEN_STATE_PATH`, fallback `OUTLOOK_DIRECT_TOKEN_STATE_PATH`, then `~/.openclaw/state/m365-direct-token.json` | Direct-mode durable token state |
-| `tenant` | `M365_TENANT`, fallback `OUTLOOK_TENANT`, then `consumers` | OAuth tenant such as `consumers`, `common`, or a tenant ID |
-| `tokenBrokerUrl` | `M365_TOKEN_BROKER_URL`, fallback `OUTLOOK_TOKEN_BROKER_URL` | Broker `/token` URL |
-| `tokenBrokerSecret` | `M365_TOKEN_BROKER_SECRET`, fallback `OUTLOOK_TOKEN_BROKER_SECRET` | Broker bearer secret |
-| `features` | `M365_FEATURES`, fallback `OUTLOOK_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Enabled tool capabilities; use the same list in the broker |
-| `personalCalendarNames` | `M365_PERSONAL_CALENDAR_NAMES`, fallback `OUTLOOK_PERSONAL_CALENDAR_NAMES` | Extra comma-separated personal calendar names |
-| `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES`, fallback `OUTLOOK_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
-
-Prefer `M365_*` for new deployments. `OUTLOOK_*` aliases remain supported.
+| `clientId` | `M365_CLIENT_ID` | Azure application/client ID |
+| `clientSecret` | `M365_CLIENT_SECRET` | Optional confidential-client secret |
+| `refreshToken` | `M365_REFRESH_TOKEN` | Direct-mode refresh token |
+| `directTokenStatePath` | `M365_DIRECT_TOKEN_STATE_PATH`, then `~/.openclaw/state/m365-direct-token.json` | Direct-mode durable token state |
+| `tenant` | `M365_TENANT`, then `consumers` | OAuth tenant such as `consumers`, `common`, or a tenant ID |
+| `tokenBrokerUrl` | `M365_TOKEN_BROKER_URL` | Broker `/token` URL |
+| `tokenBrokerSecret` | `M365_TOKEN_BROKER_SECRET` | Broker bearer secret |
+| `features` | `M365_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Enabled tool capabilities; use the same list in the broker |
+| `personalCalendarNames` | `M365_PERSONAL_CALENDAR_NAMES` | Extra comma-separated personal calendar names |
+| `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
 
 ## Tools
 
-### Outlook compatibility tools
+### Outlook mail, calendar, and task tools
 
 All existing names remain unchanged:
 

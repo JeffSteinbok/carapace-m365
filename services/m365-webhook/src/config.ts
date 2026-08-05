@@ -51,10 +51,8 @@ export function log(message: string): void {
   console.log(`[m365-webhook] ${message}`);
 }
 
-function env(m365Name: string, outlookName?: string): string {
-  return process.env[m365Name]?.trim()
-    || (outlookName ? process.env[outlookName]?.trim() : "")
-    || "";
+function env(name: string): string {
+  return process.env[name]?.trim() || "";
 }
 
 function required(value: string, names: string): string {
@@ -69,20 +67,12 @@ function normalizePath(value: string, fallback: string): string {
 
 export function loadServiceConfig(): ServiceConfig {
   const home = homedir();
-  const newStatePath = join(home, ".openclaw/state/m365-webhook.json");
-  const oldStatePath = join(home, ".openclaw/state/outlook-webhook.json");
-  const configuredState = env("M365_WEBHOOK_STATE_PATH", "OUTLOOK_WEBHOOK_STATE_PATH");
-  const statePath = configuredState
-    || (existsSync(newStatePath) || !existsSync(oldStatePath) ? newStatePath : oldStatePath);
-
-  const newRuntimePath = join(home, ".openclaw/services/m365-webhook-config.json");
-  const oldRuntimePath = join(home, ".openclaw/services/outlook-webhook-config.json");
-  const configuredRuntime = env("M365_WEBHOOK_CONFIG_PATH", "OUTLOOK_WEBHOOK_CONFIG_PATH");
-  const runtimeConfigPath = configuredRuntime
-    || (existsSync(newRuntimePath) || !existsSync(oldRuntimePath) ? newRuntimePath : oldRuntimePath);
-
-  const portValue = env("M365_TOKEN_BROKER_PORT", "OUTLOOK_TOKEN_BROKER_PORT")
-    || env("M365_WEBHOOK_PORT", "OUTLOOK_WEBHOOK_PORT")
+  const statePath = env("M365_WEBHOOK_STATE_PATH")
+    || join(home, ".openclaw/state/m365-webhook.json");
+  const runtimeConfigPath = env("M365_WEBHOOK_CONFIG_PATH")
+    || join(home, ".openclaw/services/m365-webhook-config.json");
+  const portValue = env("M365_TOKEN_BROKER_PORT")
+    || env("M365_WEBHOOK_PORT")
     || "18790";
   const port = Number.parseInt(portValue, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -90,42 +80,42 @@ export function loadServiceConfig(): ServiceConfig {
   }
 
   return {
-    bind: env("M365_TOKEN_BROKER_BIND", "OUTLOOK_TOKEN_BROKER_BIND") || "127.0.0.1",
+    bind: env("M365_TOKEN_BROKER_BIND") || "127.0.0.1",
     port,
     tokenPath: normalizePath(
-      env("M365_TOKEN_BROKER_PATH", "OUTLOOK_TOKEN_BROKER_PATH"),
+      env("M365_TOKEN_BROKER_PATH"),
       "/token",
     ),
     tokenBrokerSecret: required(
-      env("M365_TOKEN_BROKER_SECRET", "OUTLOOK_TOKEN_BROKER_SECRET"),
+      env("M365_TOKEN_BROKER_SECRET"),
       "M365_TOKEN_BROKER_SECRET",
     ),
     webhookPath: normalizePath(
-      env("M365_WEBHOOK_PATH", "OUTLOOK_WEBHOOK_PATH"),
-      "/outlook/webhook",
+      env("M365_WEBHOOK_PATH"),
+      "/m365/webhook",
     ),
     webhookUrl: required(
-      env("M365_WEBHOOK_URL", "OUTLOOK_WEBHOOK_URL"),
-      "M365_WEBHOOK_URL or OUTLOOK_WEBHOOK_URL",
+      env("M365_WEBHOOK_URL"),
+      "M365_WEBHOOK_URL",
     ),
     webhookClientState: required(
-      env("M365_WEBHOOK_CLIENT_STATE", "OUTLOOK_WEBHOOK_CLIENT_STATE"),
-      "M365_WEBHOOK_CLIENT_STATE or OUTLOOK_WEBHOOK_CLIENT_STATE",
+      env("M365_WEBHOOK_CLIENT_STATE"),
+      "M365_WEBHOOK_CLIENT_STATE",
     ),
     statePath,
     runtimeConfigPath,
     pipelineWorkspace: env("M365_PIPELINE_WORKSPACE")
       || join(home, ".openclaw/services/mail-runtime"),
     clientId: required(
-      env("M365_CLIENT_ID", "OUTLOOK_CLIENT_ID"),
-      "M365_CLIENT_ID or OUTLOOK_CLIENT_ID",
+      env("M365_CLIENT_ID"),
+      "M365_CLIENT_ID",
     ),
-    clientSecret: env("M365_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET") || undefined,
-    tenant: env("M365_TENANT", "OUTLOOK_TENANT") || "consumers",
+    clientSecret: env("M365_CLIENT_SECRET") || undefined,
+    tenant: env("M365_TENANT") || "consumers",
     features: parseM365Features(
-      env("M365_FEATURES", "OUTLOOK_FEATURES") || undefined,
+      env("M365_FEATURES") || undefined,
     ),
-    initialRefreshToken: env("M365_REFRESH_TOKEN", "OUTLOOK_REFRESH_TOKEN") || undefined,
+    initialRefreshToken: env("M365_REFRESH_TOKEN") || undefined,
     notifyTarget: required(process.env.NOTIFY_TARGET?.trim() || "", "NOTIFY_TARGET"),
     notifyChannel: process.env.NOTIFY_CHANNEL?.trim() || "discord",
   };

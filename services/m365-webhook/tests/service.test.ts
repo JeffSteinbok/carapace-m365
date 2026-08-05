@@ -7,7 +7,12 @@ import {
   GraphTokenManager,
   type HttpRequest,
 } from "@carapace/m365-graph-auth";
-import { createServiceServer, ensureSubscription } from "../src/index.js";
+import { ActionRegistry } from "carapace-mail-runtime";
+import {
+  createServiceServer,
+  ensureSubscription,
+} from "../src/index.js";
+import { handleNotification } from "../src/handlers.js";
 import type { GraphClient } from "../src/graph.js";
 import { StateStore } from "../src/state.js";
 
@@ -62,7 +67,7 @@ describe("m365 webhook token broker", () => {
       config: {
         tokenPath: "/token",
         tokenBrokerSecret: "expected-secret",
-        webhookPath: "/outlook/webhook",
+        webhookPath: "/m365/webhook",
         features: [...DEFAULT_M365_FEATURES],
       },
       tokenSource: { getToken },
@@ -97,7 +102,7 @@ describe("m365 webhook token broker", () => {
       config: {
         tokenPath: "/token",
         tokenBrokerSecret: "expected-secret",
-        webhookPath: "/outlook/webhook",
+        webhookPath: "/m365/webhook",
         features: ["onedrive-read"],
       },
       tokenSource: { getToken },
@@ -170,7 +175,7 @@ describe("m365 webhook token broker", () => {
       refreshToken: "refresh",
       subscriptionId: "subscription-1",
       expirationDateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      notificationUrl: "https://example.test/outlook/webhook",
+      notificationUrl: "https://example.test/m365/webhook",
       clientState: "client-state",
     };
     store.save(state);
@@ -184,7 +189,7 @@ describe("m365 webhook token broker", () => {
     } as unknown as GraphClient;
 
     await ensureSubscription(graph, store, {
-      webhookUrl: "https://example.test/outlook/webhook",
+      webhookUrl: "https://example.test/m365/webhook",
       clientState: "client-state",
     });
 
@@ -200,7 +205,7 @@ describe("m365 webhook token broker", () => {
       refreshToken: "refresh",
       subscriptionId: "subscription-old",
       expirationDateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      notificationUrl: "https://old.example.test/outlook/webhook",
+      notificationUrl: "https://old.example.test/m365/webhook",
       clientState: "old-client-state",
     });
     const deleteSubscription = vi.fn().mockResolvedValue(undefined);
@@ -216,21 +221,21 @@ describe("m365 webhook token broker", () => {
     } as unknown as GraphClient;
 
     await ensureSubscription(graph, store, {
-      webhookUrl: "https://new.example.test/outlook/webhook",
+      webhookUrl: "https://new.example.test/m365/webhook",
       clientState: "new-client-state",
     });
 
     expect(deleteSubscription).toHaveBeenCalledWith("subscription-old");
     expect(renewSubscription).not.toHaveBeenCalled();
     expect(createSubscription).toHaveBeenCalledWith(expect.objectContaining({
-      notificationUrl: "https://new.example.test/outlook/webhook",
+      notificationUrl: "https://new.example.test/m365/webhook",
       clientState: "new-client-state",
     }));
     expect(store.load()).toEqual({
       refreshToken: "refresh",
       subscriptionId: "subscription-new",
       expirationDateTime: "2026-08-07T00:00:00.000Z",
-      notificationUrl: "https://new.example.test/outlook/webhook",
+      notificationUrl: "https://new.example.test/m365/webhook",
       clientState: "new-client-state",
     });
   });
@@ -242,7 +247,7 @@ describe("m365 webhook token broker", () => {
       subscriptionId: "subscription-legacy",
       expirationDateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     });
-    const deleteSubscription = vi.fn().mockRejectedValue(new Error("already gone"));
+    const deleteSubscription = vi.fn().mockResolvedValue(undefined);
     const createSubscription = vi.fn().mockResolvedValue({
       id: "subscription-new",
       expirationDateTime: "2026-08-07T00:00:00.000Z",
@@ -254,7 +259,7 @@ describe("m365 webhook token broker", () => {
     } as unknown as GraphClient;
 
     await ensureSubscription(graph, store, {
-      webhookUrl: "https://example.test/outlook/webhook",
+      webhookUrl: "https://example.test/m365/webhook",
       clientState: "client-state",
     });
 
@@ -264,8 +269,66 @@ describe("m365 webhook token broker", () => {
       refreshToken: "refresh",
       subscriptionId: "subscription-new",
       expirationDateTime: "2026-08-07T00:00:00.000Z",
-      notificationUrl: "https://example.test/outlook/webhook",
+      notificationUrl: "https://example.test/m365/webhook",
       clientState: "client-state",
     });
+  });
+
+  it("does not create a replacement when old subscription cleanup fails", async () => {
+    const store = new StateStore(resolve(scratch, "failed-cleanup-state.json"));
+    store.save({
+      subscriptionId: "subscription-old",
+      expirationDateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      notificationUrl: "https://old.example.test/m365/webhook",
+      clientState: "old-client-state",
+    });
+    const deleteSubscription = vi.fn().mockRejectedValue(new Error("Graph unavailable"));
+    const createSubscription = vi.fn();
+    const graph = {
+      createSubscription,
+      renewSubscription: vi.fn(),
+      deleteSubscription,
+    } as unknown as GraphClient;
+
+    await expect(ensureSubscription(graph, store, {
+      webhookUrl: "https://new.example.test/m365/webhook",
+      clientState: "new-client-state",
+    })).rejects.toThrow("refusing replacement");
+
+    expect(createSubscription).not.toHaveBeenCalled();
+    expect(store.load().subscriptionId).toBe("subscription-old");
+  });
+
+  it("deduplicates persisted Graph message notifications", async () => {
+    const store = new StateStore(resolve(scratch, "notification-state.json"));
+    const fetchMessage = vi.fn().mockResolvedValue({
+      id: "message-1",
+      subject: "Test message",
+      from: { emailAddress: { address: "sender@example.test" } },
+    });
+    const graph = { fetchMessage } as unknown as GraphClient;
+    const notification = JSON.stringify({
+      value: [
+        { clientState: "client-state", resourceData: { id: "message-1" } },
+        { clientState: "client-state", resourceData: { id: "message-1" } },
+      ],
+    });
+    const options = {
+      graph,
+      clientState: "client-state",
+      pipelineRules: [],
+      registry: new ActionRegistry(),
+      runtimeConfig: {},
+      notifyChannel: "test",
+      notifyTarget: "target",
+      pipelineWorkspace: scratch,
+      notificationStore: store,
+    };
+
+    await handleNotification(notification, options);
+    await handleNotification(notification, options);
+
+    expect(fetchMessage).toHaveBeenCalledOnce();
+    expect(store.load().processedNotificationIds).toEqual(["message-1"]);
   });
 });

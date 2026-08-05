@@ -134,6 +134,7 @@ export function createServiceServer(options: {
   notifyChannel?: string;
   notifyTarget?: string;
   pipelineWorkspace?: string;
+  notificationStore?: StateStore;
 }): http.Server {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -180,6 +181,7 @@ export function createServiceServer(options: {
         notifyChannel: options.notifyChannel,
         notifyTarget: options.notifyTarget,
         pipelineWorkspace: options.pipelineWorkspace,
+        notificationStore: options.notificationStore,
       });
     } catch (error) {
       log(`error handling webhook request: ${error}`);
@@ -198,6 +200,14 @@ export async function ensureSubscription(
   const state = store.load();
   const configurationMatches = state.notificationUrl === options.webhookUrl
     && state.clientState === options.clientState;
+  const clearSubscription = (): void => {
+    store.update({
+      subscriptionId: undefined,
+      expirationDateTime: undefined,
+      notificationUrl: undefined,
+      clientState: undefined,
+    });
+  };
 
   if (state.subscriptionId && (!state.expirationDateTime || !configurationMatches)) {
     log("stored Graph subscription configuration changed; replacing subscription");
@@ -205,14 +215,9 @@ export async function ensureSubscription(
       await graph.deleteSubscription(state.subscriptionId);
       log("stale Graph subscription removed");
     } catch (error) {
-      log(`could not remove stale Graph subscription; continuing with replacement: ${error}`);
+      throw new Error(`could not remove stale Graph subscription; refusing replacement: ${error}`);
     }
-    store.update({
-      subscriptionId: undefined,
-      expirationDateTime: undefined,
-      notificationUrl: undefined,
-      clientState: undefined,
-    });
+    clearSubscription();
   } else if (state.subscriptionId && state.expirationDateTime) {
     const remaining = new Date(state.expirationDateTime).getTime() - Date.now();
     if (remaining > RENEWAL_THRESHOLD_MS) {
@@ -232,8 +237,13 @@ export async function ensureSubscription(
         log(`Graph subscription renewed through ${renewed.expirationDateTime}`);
         return;
       } catch (error) {
-        log(`Graph subscription renewal failed; creating a replacement: ${error}`);
+        log(`Graph subscription renewal failed; removing old subscription before replacement: ${error}`);
+        await graph.deleteSubscription(state.subscriptionId);
+        clearSubscription();
       }
+    } else {
+      await graph.deleteSubscription(state.subscriptionId);
+      clearSubscription();
     }
   }
 
@@ -259,7 +269,7 @@ export async function main(): Promise<void> {
   const refreshToken = state.refreshToken || config.initialRefreshToken;
   if (!refreshToken) {
     throw new Error(
-      "No refresh token is available in state or M365_REFRESH_TOKEN/OUTLOOK_REFRESH_TOKEN",
+      "No refresh token is available in state or M365_REFRESH_TOKEN",
     );
   }
   if (!state.refreshToken) store.update({ refreshToken });
@@ -319,6 +329,7 @@ export async function main(): Promise<void> {
     notifyChannel: config.notifyChannel,
     notifyTarget: config.notifyTarget,
     pipelineWorkspace: config.pipelineWorkspace,
+    notificationStore: store,
   });
   await new Promise<void>((resolve) => {
     server.listen(config.port, config.bind, () => {

@@ -43,7 +43,7 @@ Options:
   --list-features    Print available feature names
   --help             Show this help
 
-The default preserves the pre-OneDrive Outlook consent:
+The default enables the core Microsoft 365 consent:
   ${DEFAULT_M365_FEATURES.join(", ")}
 
 offline_access and openid are added only to this interactive authorization
@@ -65,11 +65,11 @@ if (hasArg("list-features")) {
 
 const clientId = arg(
   "client-id",
-  process.env.M365_CLIENT_ID || process.env.OUTLOOK_CLIENT_ID || DEFAULT_CLIENT_ID,
+  process.env.M365_CLIENT_ID || DEFAULT_CLIENT_ID,
 );
 const tenant = arg(
   "tenant",
-  process.env.M365_TENANT || process.env.OUTLOOK_TENANT || "consumers",
+  process.env.M365_TENANT || "consumers",
 );
 const port = Number(arg("port", "53682"));
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -233,7 +233,7 @@ const server = http.createServer(async (req, res) => {
     res.end("<h1>Signed in</h1><p>You can close this tab and return to the terminal.</p>");
     console.log("\nRefresh token acquired. Store it in the webhook service state or environment:\n");
     console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
-    console.log(`# Backward-compatible alias: OUTLOOK_REFRESH_TOKEN=${tokens.refresh_token}`);
+    console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
     console.log(`M365_FEATURES=${inferred.features.join(",")}`);
     console.log("\nUse the same features in the plugin config:\n");
     console.log(JSON.stringify({ features: inferred.features }, null, 2));

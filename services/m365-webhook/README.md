@@ -1,7 +1,7 @@
 # Microsoft 365 webhook and token broker
 
-This standalone process replaces
-`openclaw-hub/services/outlook-webhook`. It:
+This standalone process owns Microsoft Graph webhook delivery and token
+brokering. It:
 
 - receives Microsoft Graph inbox change notifications;
 - runs messages through `carapace-mail-runtime`;
@@ -14,7 +14,7 @@ Normal shutdown deliberately does **not** delete a valid Graph subscription.
 
 ## Build and run
 
-From the `carapace-outlook` repository root:
+From the `carapace-m365` repository root:
 
 ```bash
 npm install
@@ -26,27 +26,24 @@ node services/m365-webhook/dist/index.js
 
 | Variable | Default / fallback | Purpose |
 |---|---|---|
-| `M365_CLIENT_ID` | `OUTLOOK_CLIENT_ID` | App registration client ID |
-| `M365_CLIENT_SECRET` | `OUTLOOK_CLIENT_SECRET` | Optional confidential-client secret |
-| `M365_TENANT` | `OUTLOOK_TENANT`, then `consumers` | OAuth tenant such as `common` or a tenant ID |
-| `M365_REFRESH_TOKEN` | `OUTLOOK_REFRESH_TOKEN` | Initial token, used when state has no token |
-| `M365_FEATURES` | `OUTLOOK_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Authoritative comma-separated broker scope allowlist |
-| `M365_TOKEN_BROKER_SECRET` | `OUTLOOK_TOKEN_BROKER_SECRET` | Required bearer secret for `/token` |
-| `M365_TOKEN_BROKER_BIND` | `OUTLOOK_TOKEN_BROKER_BIND`, then `127.0.0.1` | HTTP bind address |
-| `M365_TOKEN_BROKER_PORT` | `OUTLOOK_TOKEN_BROKER_PORT`, `M365_WEBHOOK_PORT`, `OUTLOOK_WEBHOOK_PORT`, then `18790` | Shared broker/webhook port |
-| `M365_TOKEN_BROKER_PATH` | `OUTLOOK_TOKEN_BROKER_PATH`, then `/token` | Token endpoint path |
-| `M365_WEBHOOK_PORT` | `OUTLOOK_WEBHOOK_PORT`, then `18790` | Backward-compatible shared port setting |
-| `M365_WEBHOOK_PATH` | `OUTLOOK_WEBHOOK_PATH`, then `/outlook/webhook` | Local Graph webhook path |
-| `M365_WEBHOOK_URL` | `OUTLOOK_WEBHOOK_URL` | Required public HTTPS notification URL |
-| `M365_WEBHOOK_CLIENT_STATE` | `OUTLOOK_WEBHOOK_CLIENT_STATE` | Required Graph notification validation secret |
-| `M365_WEBHOOK_STATE_PATH` | `OUTLOOK_WEBHOOK_STATE_PATH`, then `~/.openclaw/state/m365-webhook.json` | Token/subscription state |
-| `M365_WEBHOOK_CONFIG_PATH` | `OUTLOOK_WEBHOOK_CONFIG_PATH`, then `~/.openclaw/services/m365-webhook-config.json` | Mail-runtime rules |
+| `M365_CLIENT_ID` | — | App registration client ID |
+| `M365_CLIENT_SECRET` | — | Optional confidential-client secret |
+| `M365_TENANT` | `consumers` | OAuth tenant such as `common` or a tenant ID |
+| `M365_REFRESH_TOKEN` | — | Initial token, used when state has no token |
+| `M365_FEATURES` | `calendar-write,mail-write,mail-send,tasks-write` | Authoritative comma-separated broker scope allowlist |
+| `M365_TOKEN_BROKER_SECRET` | — | Required bearer secret for `/token` |
+| `M365_TOKEN_BROKER_BIND` | `127.0.0.1` | HTTP bind address |
+| `M365_TOKEN_BROKER_PORT` | `18790` | Shared broker/webhook port |
+| `M365_TOKEN_BROKER_PATH` | `/token` | Token endpoint path |
+| `M365_WEBHOOK_PORT` | `18790` | Shared broker/webhook port fallback |
+| `M365_WEBHOOK_PATH` | `/m365/webhook` | Local Graph webhook path |
+| `M365_WEBHOOK_URL` | — | Required public HTTPS notification URL |
+| `M365_WEBHOOK_CLIENT_STATE` | — | Required Graph notification validation secret |
+| `M365_WEBHOOK_STATE_PATH` | `~/.openclaw/state/m365-webhook.json` | Token/subscription state |
+| `M365_WEBHOOK_CONFIG_PATH` | `~/.openclaw/services/m365-webhook-config.json` | Mail-runtime rules |
 | `M365_PIPELINE_WORKSPACE` | `~/.openclaw/services/mail-runtime` | Mail-runtime workspace |
 | `NOTIFY_TARGET` | none | Required OpenClaw notification target |
 | `NOTIFY_CHANNEL` | `discord` | OpenClaw notification channel |
-
-If the new default state/config file is absent and the old Outlook default
-exists, the service reuses the old path automatically.
 
 Use long independently generated values for `M365_TOKEN_BROKER_SECRET` and
 `M365_WEBHOOK_CLIENT_STATE`. Neither is logged.
@@ -55,8 +52,8 @@ Set `M365_FEATURES` to the exact same normalized feature list used by the
 plugin. Supported values are `mail-read`, `mail-write`, `mail-send`,
 `calendar-read`, `calendar-write`, `tasks-read`, `tasks-write`,
 `onedrive-read`, and `onedrive-write`. Write features imply their matching read
-feature. `mail-send` is independent. The default preserves pre-OneDrive Outlook
-behavior, so OneDrive scopes are denied unless explicitly enabled.
+feature. `mail-send` is independent. OneDrive scopes are denied unless
+explicitly enabled.
 
 ## Token endpoint
 
@@ -93,7 +90,7 @@ State JSON contains:
   "refreshToken": "...",
   "subscriptionId": "...",
   "expirationDateTime": "...",
-  "notificationUrl": "https://example.test/outlook/webhook",
+  "notificationUrl": "https://example.test/m365/webhook",
   "clientState": "..."
 }
 ```
@@ -117,7 +114,7 @@ Example routing:
 
 ```json
 {
-  "path": "/outlook/webhook",
+  "path": "/m365/webhook",
   "target": "http://127.0.0.1:18790",
   "auth": "none"
 }
@@ -130,13 +127,13 @@ The root plugin should call `http://127.0.0.1:18790/token` directly.
 Old executable:
 
 ```text
-/home/openclaw/git/openclaw-hub/services/outlook-webhook/dist/index.js
+/home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
 ```
 
 New executable:
 
 ```text
-/home/openclaw/git/carapace-outlook/services/m365-webhook/dist/index.js
+/home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
 ```
 
 No change to `openclaw-hub` is required in this repository task. Update the
@@ -150,7 +147,7 @@ Description=OpenClaw Microsoft 365 Webhook and Token Broker
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node /home/openclaw/git/carapace-outlook/services/m365-webhook/dist/index.js
+ExecStart=/usr/bin/node /home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
 Restart=on-failure
 RestartSec=10
 EnvironmentFile=%h/.openclaw/.env
@@ -167,6 +164,5 @@ systemctl --user enable --now m365-webhook
 systemctl --user status m365-webhook
 ```
 
-If retaining the old unit name temporarily, only its `ExecStart` needs to point
-to the new path. Do not run both services with the same refresh token; competing
-rotation can invalidate one process.
+Do not run multiple services with the same refresh token; competing rotation can
+invalidate one process.

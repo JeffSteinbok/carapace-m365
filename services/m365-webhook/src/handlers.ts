@@ -8,6 +8,7 @@ import { log, type MailRule } from "./config.js";
 import { dispatchResults } from "./dispatch.js";
 import { GraphClient, type GraphMessage } from "./graph.js";
 import { OutlookProviderClient } from "./provider.js";
+import { StateStore } from "./state.js";
 
 interface GraphNotificationValue {
   clientState?: string;
@@ -50,7 +51,7 @@ export function messageToEnvelope(message: GraphMessage): MailEnvelope {
   return {
     message_id: message.id,
     provider: "outlook",
-    account_id: "outlook",
+    account_id: "m365",
     mailbox_id: "inbox",
     sender_name: from?.name ?? "",
     sender_email: from?.address ?? "unknown",
@@ -91,6 +92,7 @@ export async function handleNotification(
     notifyChannel: string;
     notifyTarget: string;
     pipelineWorkspace: string;
+    notificationStore?: StateStore;
   },
 ): Promise<void> {
   let parsed: GraphNotificationBody;
@@ -117,6 +119,10 @@ export async function handleNotification(
       log("Graph notification did not include resourceData.id");
       continue;
     }
+    if (options.notificationStore && !options.notificationStore.claimNotification(messageId)) {
+      log(`skipping duplicate Graph notification for message ${messageId}`);
+      continue;
+    }
     try {
       const message = await options.graph.fetchMessage(messageId);
       const envelope = messageToEnvelope(message);
@@ -136,7 +142,9 @@ export async function handleNotification(
         channel: options.notifyChannel,
         target: options.notifyTarget,
       });
+      options.notificationStore?.completeNotification(messageId);
     } catch (error) {
+      options.notificationStore?.releaseNotification(messageId);
       log(`error processing message ${messageId}: ${error}`);
     }
   }

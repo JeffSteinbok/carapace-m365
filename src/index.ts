@@ -1,9 +1,19 @@
 /**
- * Outlook plugin — unified mail + calendar tools via Microsoft Graph.
+ * Microsoft 365 plugin — unified mail, calendar, tasks, and OneDrive tools via Microsoft Graph.
  */
 
-import { definePlugin } from "carapace-plugin-sdk";
+import {
+  definePlugin,
+  type PluginApi,
+  type PluginEntry,
+} from "carapace-plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import {
+  DEFAULT_TOKEN_BROKER_URL,
+  isM365FeatureEnabled,
+  parseM365Features,
+  type M365Feature,
+} from "@carapace/m365-graph-auth";
 import {
   fetchCalendar,
   createEvent,
@@ -28,25 +38,45 @@ import {
   deleteTask,
   type OutlookCalendarConfig,
 } from "./handlers.js";
+import {
+  createOneDriveFolder,
+  deleteOneDriveItem,
+  downloadOneDriveFile,
+  getOneDriveMetadata,
+  listOneDrive,
+  moveOneDriveItem,
+  searchOneDrive,
+  uploadOneDriveFile,
+} from "./onedrive.js";
+import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
 
 /**
  * Published public-client app registration (PKCE, personal Microsoft accounts).
  * The client ID of a public client is not a secret, so it ships as the default:
  * users can run `npm run login` and consent with their own account without
  * registering their own Azure app. Override via config.clientId or
- * OUTLOOK_CLIENT_ID to point at your own registration.
+ * M365_CLIENT_ID to point at your own registration.
  */
 export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 
-export const createEntry = definePlugin({
-  id: "outlook",
-  name: "Outlook",
-  description: "Mail, calendar, and task tools for Outlook via Microsoft Graph",
+const createBaseEntry = definePlugin({
+  id: "m365",
+  name: "Microsoft 365",
+  description: "Outlook mail, calendar, tasks, and OneDrive tools via Microsoft Graph",
 
   configSchema: Type.Object({
     clientId: Type.Optional(Type.String({ description: "Microsoft OAuth client ID" })),
     clientSecret: Type.Optional(Type.String({ description: "Microsoft OAuth client secret" })),
     refreshToken: Type.Optional(Type.String({ description: "Microsoft OAuth refresh token" })),
+    directTokenStatePath: Type.Optional(Type.String({ description: "Direct-mode refresh-token state path" })),
+    tenant: Type.Optional(Type.String({ description: "Microsoft OAuth tenant (default: consumers)" })),
+    tokenBrokerUrl: Type.Optional(Type.String({ description: "Authoritative Microsoft 365 token broker URL" })),
+    tokenBrokerSecret: Type.Optional(Type.String({ description: "Bearer secret used to authenticate to the token broker" })),
+    features: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "Microsoft 365 features to register. OneDrive requires explicit enablement.",
+      }),
+    ),
     personalCalendarNames: Type.Optional(
       Type.Array(Type.String(), { description: "Additional personal calendar names to match." }),
     ),
@@ -474,29 +504,269 @@ export const createEntry = definePlugin({
       },
     }),
 
+    // -------------------------------------------------------------------------
+    // OneDrive tools
+    // -------------------------------------------------------------------------
+
+    tool({
+      name: "onedrive_list",
+      label: "OneDrive List",
+      description: "List files and folders in the OneDrive root or a folder addressed by item ID or path.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String({ description: "OneDrive folder item ID. Mutually exclusive with path." })),
+        path: Type.Optional(Type.String({ description: "OneDrive folder path relative to the drive root. Omit for root." })),
+        limit: Type.Optional(Type.Integer({ description: "Maximum items to return, 1-200 (default 50)." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await listOneDrive(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_search",
+      label: "OneDrive Search",
+      description: "Search OneDrive files and folders by name or content.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search text." }),
+        limit: Type.Optional(Type.Integer({ description: "Maximum items to return, 1-200 (default 25)." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await searchOneDrive(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_metadata",
+      label: "OneDrive Metadata",
+      description: "Get metadata for the OneDrive root or an item addressed by ID or path.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String({ description: "OneDrive item ID. Mutually exclusive with path." })),
+        path: Type.Optional(Type.String({ description: "OneDrive path relative to the drive root. Omit for root." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await getOneDriveMetadata(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_download",
+      label: "OneDrive Download",
+      description: "Download a OneDrive file to a local path without overwriting unless explicitly requested.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String({ description: "OneDrive file item ID. Mutually exclusive with path." })),
+        path: Type.Optional(Type.String({ description: "OneDrive file path relative to the drive root." })),
+        output_path: Type.String({ description: "Local destination file path." }),
+        overwrite: Type.Optional(Type.Boolean({ description: "Replace an existing local file (default false)." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await downloadOneDriveFile(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_upload",
+      label: "OneDrive Upload",
+      description: "Upload a local file up to 4 MiB to OneDrive.",
+      parameters: Type.Object({
+        local_path: Type.String({ description: "Local file path to upload." }),
+        name: Type.Optional(Type.String({ description: "Remote file name. Defaults to the local basename." })),
+        parent_id: Type.Optional(Type.String({ description: "Destination folder item ID. Mutually exclusive with parent_path." })),
+        parent_path: Type.Optional(Type.String({ description: "Destination folder path relative to root. Omit for root." })),
+        overwrite: Type.Optional(Type.Boolean({ description: "Replace an existing remote file (default false)." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await uploadOneDriveFile(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_create_folder",
+      label: "OneDrive Create Folder",
+      description: "Create a OneDrive folder without replacing an existing item.",
+      parameters: Type.Object({
+        name: Type.String({ description: "New folder name." }),
+        parent_id: Type.Optional(Type.String({ description: "Parent folder item ID. Mutually exclusive with parent_path." })),
+        parent_path: Type.Optional(Type.String({ description: "Parent folder path relative to root. Omit for root." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await createOneDriveFolder(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_move",
+      label: "OneDrive Move or Rename",
+      description: "Move or rename a OneDrive item addressed by item ID or path.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String({ description: "Source item ID. Mutually exclusive with path." })),
+        path: Type.Optional(Type.String({ description: "Source item path relative to root." })),
+        new_name: Type.Optional(Type.String({ description: "New file or folder name." })),
+        parent_id: Type.Optional(Type.String({ description: "Destination folder item ID. Mutually exclusive with parent_path." })),
+        parent_path: Type.Optional(Type.String({ description: "Destination folder path relative to root." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await moveOneDriveItem(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "onedrive_delete",
+      label: "OneDrive Delete",
+      description: "Delete a OneDrive item addressed by item ID or path.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String({ description: "OneDrive item ID. Mutually exclusive with path." })),
+        path: Type.Optional(Type.String({ description: "OneDrive item path relative to root." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await deleteOneDriveItem(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
   ],
 });
+
+export const TOOL_REQUIRED_FEATURE = {
+  outlook_inbox: "mail-read",
+  outlook_search: "mail-read",
+  outlook_read: "mail-read",
+  outlook_save_attachments: "mail-read",
+  outlook_send: "mail-send",
+  outlook_reply: "mail-send",
+  outlook_forward: "mail-send",
+  outlook_move: "mail-write",
+  outlook_flag: "mail-write",
+  outlook_task_lists: "tasks-read",
+  outlook_tasks: "tasks-read",
+  outlook_create_task: "tasks-write",
+  outlook_update_task: "tasks-write",
+  outlook_complete_task: "tasks-write",
+  outlook_delete_task: "tasks-write",
+  outlook_calendar_fetch: "calendar-read",
+  outlook_create_event: "calendar-write",
+  outlook_update_event: "calendar-write",
+  outlook_delete_event: "calendar-write",
+  outlook_meeting: "calendar-write",
+  outlook_query_events: "calendar-read",
+  onedrive_list: "onedrive-read",
+  onedrive_search: "onedrive-read",
+  onedrive_metadata: "onedrive-read",
+  onedrive_download: "onedrive-read",
+  onedrive_upload: "onedrive-write",
+  onedrive_create_folder: "onedrive-write",
+  onedrive_move: "onedrive-write",
+  onedrive_delete: "onedrive-write",
+} as const satisfies Record<string, M365Feature>;
+
+function configuredFeatures(config: Record<string, unknown> | undefined): M365Feature[] {
+  if (config && Object.prototype.hasOwnProperty.call(config, "features")) {
+    return parseM365Features(config.features as readonly unknown[]);
+  }
+  const envFeatures = process.env.M365_FEATURES?.trim();
+  return parseM365Features(envFeatures || undefined);
+}
+
+export function createEntry(): PluginEntry {
+  const entry = createBaseEntry();
+  const registerAll = entry.register.bind(entry);
+  return {
+    ...entry,
+    register(api: PluginApi) {
+      const features = configuredFeatures(api.pluginConfig);
+      registerAll({
+        ...api,
+        registerTool(tool: unknown) {
+          const name = (tool as { name?: unknown })?.name;
+          if (typeof name !== "string" || !(name in TOOL_REQUIRED_FEATURE)) {
+            throw new Error(`Microsoft 365 tool is missing a feature policy: ${String(name)}`);
+          }
+          const required = TOOL_REQUIRED_FEATURE[
+            name as keyof typeof TOOL_REQUIRED_FEATURE
+          ];
+          if (isM365FeatureEnabled(features, required)) {
+            api.registerTool(tool);
+          }
+        },
+      });
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Config resolver
 // ---------------------------------------------------------------------------
 
-function resolveConfig(config: {
+export function resolveConfig(config: {
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string;
+  directTokenStatePath?: string;
+  tenant?: string;
+  tokenBrokerUrl?: string;
+  tokenBrokerSecret?: string;
+  features?: string[];
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
 }): OutlookCalendarConfig {
-  const parseNames = (values: string[] | undefined, envKey: string): string[] => {
+  const env = (name: string): string => process.env[name]?.trim() || "";
+  const parseNames = (values: string[] | undefined, key: string): string[] => {
     if (Array.isArray(values)) return values.map(n => n.trim().toLowerCase()).filter(Boolean);
-    return String(process.env[envKey] ?? "").split(",").map(n => n.trim().toLowerCase()).filter(Boolean);
+    return env(key).split(",").map(n => n.trim().toLowerCase()).filter(Boolean);
   };
+  const brokerSecret = config.tokenBrokerSecret?.trim()
+    || env("M365_TOKEN_BROKER_SECRET");
+  const brokerUrl = config.tokenBrokerUrl?.trim()
+    || env("M365_TOKEN_BROKER_URL")
+    || (brokerSecret ? DEFAULT_TOKEN_BROKER_URL : "");
   return {
-    clientId: config.clientId?.trim() || process.env.OUTLOOK_CLIENT_ID || DEFAULT_CLIENT_ID,
-    clientSecret: config.clientSecret?.trim() || process.env.OUTLOOK_CLIENT_SECRET || "",
-    refreshToken: config.refreshToken?.trim() || process.env.OUTLOOK_REFRESH_TOKEN || "",
-    personalCalendarNames: parseNames(config.personalCalendarNames, "OUTLOOK_PERSONAL_CALENDAR_NAMES"),
-    familyCalendarNames: parseNames(config.familyCalendarNames, "OUTLOOK_FAMILY_CALENDAR_NAMES"),
+    clientId: config.clientId?.trim() || env("M365_CLIENT_ID") || DEFAULT_CLIENT_ID,
+    clientSecret: config.clientSecret?.trim() || env("M365_CLIENT_SECRET"),
+    refreshToken: config.refreshToken?.trim() || env("M365_REFRESH_TOKEN"),
+    directTokenStatePath: config.directTokenStatePath?.trim()
+      || env("M365_DIRECT_TOKEN_STATE_PATH")
+      || DEFAULT_DIRECT_TOKEN_STATE_PATH,
+    tenant: config.tenant?.trim() || env("M365_TENANT") || "consumers",
+    tokenBrokerUrl: brokerUrl,
+    tokenBrokerSecret: brokerSecret,
+    features: configuredFeatures(config),
+    personalCalendarNames: parseNames(
+      config.personalCalendarNames,
+      "M365_PERSONAL_CALENDAR_NAMES",
+    ),
+    familyCalendarNames: parseNames(
+      config.familyCalendarNames,
+      "M365_FAMILY_CALENDAR_NAMES",
+    ),
   };
 }

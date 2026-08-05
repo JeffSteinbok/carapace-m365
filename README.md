@@ -1,32 +1,104 @@
-# 🐚📧 carapace-outlook
+# 🐚 Carapace Microsoft 365
 
-Unified mail, calendar, and task tools for Outlook / Microsoft 365 via Microsoft Graph API. Replaces the former `outlook-mail` and `outlook-calendar` plugins.
+Microsoft 365 tools for Outlook mail, calendars, Microsoft To Do, and OneDrive
+through Microsoft Graph.
 
-Built with [🦞🐚 Carapace](https://github.com/JeffSteinbok/carapace-plugin-sdk).
+The package is named `carapace-m365`. Outlook and OneDrive tool names remain
+brand-specific within the Microsoft 365 plugin.
 
-## Setup
+## Architecture
 
-Get running in under a minute using the **published app registration** — no
-Azure setup required. (The client ID of a public/PKCE app is not a secret, so
-carapace-outlook ships one as the default.)
+The recommended deployment uses the standalone token broker included in this
+repository:
 
-### 1. Sign in and mint a refresh token
+```text
+Carapace/OpenClaw M365 plugin ── authenticated /token ──► m365-webhook
+                                                     ├─ owns refresh token
+                                                     ├─ persists rotation
+                                                     ├─ renews Graph subscription
+                                                     └─ dispatches inbox notifications
+```
 
-From the plugin directory:
+The plugin caches scoped access tokens locally. When a broker is configured it
+is authoritative: the plugin never falls back to refreshing independently after
+a broker failure. It may continue only with a cached access token that has not
+actually expired.
 
-```bash
+Direct refresh-token mode remains available for migration and simple
+single-process use.
+
+## Quick start
+
+### 1. Consent only to the features you want
+
+The default grants the core capabilities:
+`calendar-write,mail-write,mail-send,tasks-write`. It does **not** add OneDrive,
+and OneDrive tools are not registered unless `onedrive-read` or
+`onedrive-write` is explicitly enabled.
+
+```powershell
 npm run login
 ```
 
-This opens your browser, you consent with your **personal Microsoft account**,
-and it prints an `OUTLOOK_REFRESH_TOKEN`. That refresh token is the only
-credential you need — there is no client secret.
+Use `--features` for least-privilege or incremental consent:
 
-### 2. Set the environment variable
+```powershell
+# Read-only OneDrive
+npm run login -- --features onedrive-read
 
-```bash
-OUTLOOK_REFRESH_TOKEN=your-refresh-token
+# Full OneDrive (read and write)
+npm run login -- --features onedrive-write
+
+# Existing mail capabilities only
+npm run login -- --features mail-write,mail-send
+
+# Calendar only
+npm run login -- --features calendar-write
+
+# Existing Outlook capabilities plus full OneDrive
+npm run login -- --features calendar-write,mail-write,mail-send,tasks-write,onedrive-write
+
+# Exact delegated scopes are also supported
+npm run login -- --scopes "Mail.Read Files.Read"
 ```
+
+Run `npm run login -- --list-features` for every feature name. The login command
+adds `offline_access` and `openid` because interactive authorization needs them
+to issue a refresh token; Graph access-token requests use only the scopes needed
+for each operation. After consent it prints `M365_FEATURES` and a matching
+plugin `features` snippet; use that same normalized list in both places.
+
+### 2. Run the token broker/webhook service
+
+Build everything:
+
+```powershell
+npm install
+npm run build
+```
+
+Set at least:
+
+```text
+M365_CLIENT_ID=your-app-client-id
+M365_REFRESH_TOKEN=the-token-from-login
+M365_FEATURES=calendar-write,mail-write,mail-send,tasks-write
+M365_TOKEN_BROKER_SECRET=a-long-random-secret
+M365_WEBHOOK_URL=https://your-public-host/m365/webhook
+M365_WEBHOOK_CLIENT_STATE=another-long-random-secret
+NOTIFY_TARGET=your-openclaw-notification-target
+```
+
+Then start:
+
+```powershell
+node services/m365-webhook/dist/index.js
+```
+
+The service binds to `127.0.0.1:18790` by default, exposes authenticated
+`POST /token`, and accepts Graph notifications at `/m365/webhook`. See
+[services/m365-webhook/README.md](services/m365-webhook/README.md) for proxy,
+state, deployment, and systemd details.
 
 ### 3. Configure the plugin
 
@@ -34,10 +106,12 @@ OUTLOOK_REFRESH_TOKEN=your-refresh-token
 {
   "plugins": {
     "entries": {
-      "outlook": {
+      "m365": {
         "enabled": true,
         "config": {
-          "refreshToken": "${OUTLOOK_REFRESH_TOKEN}"
+          "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
+          "tokenBrokerUrl": "http://127.0.0.1:18790/token",
+          "tokenBrokerSecret": "${M365_TOKEN_BROKER_SECRET}"
         }
       }
     }
@@ -45,254 +119,164 @@ OUTLOOK_REFRESH_TOKEN=your-refresh-token
 }
 ```
 
-`clientId` defaults to the published app registration and `clientSecret` is not
-used. Credentials can be passed directly in config or via environment variables
-— env vars are the recommended approach.
+If only `tokenBrokerSecret` is configured, the URL defaults to
+`http://127.0.0.1:18790/token`. Non-loopback broker URLs must use HTTPS.
 
-> **Prefer your own Azure app?** If you want a different account-type audience,
-> your own name on the consent screen, a registration you control, or the older
-> confidential-client (client-secret) flow, see
-> **[docs/custom-app-registration.md](docs/custom-app-registration.md)**. It
-> covers registering your own public-client or confidential-client app, a
-> pros/cons comparison of the two auth mechanisms, and the manual OAuth flow.
+### Direct mode
 
-## Configuration Reference
+For migration or a single process without the webhook broker:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `clientId` | string | No | Azure app client ID. Defaults to the published carapace-outlook app registration; override to use your own |
-| `clientSecret` | string | No | Azure app client secret. Omit for public-client (PKCE) apps; provide only for confidential-client registrations |
-| `refreshToken` | string | Yes | OAuth refresh token with mail + calendar + task scopes |
-| `personalCalendarNames` | string[] | No | Additional calendar names to treat as personal (default: `["Calendar", "calendar"]`) |
-| `familyCalendarNames` | string[] | No | Additional calendar names to treat as family (default: `["Your Family", "Family"]`) |
+```json
+{
+  "plugins": {
+    "entries": {
+      "m365": {
+        "enabled": true,
+        "config": {
+          "features": ["calendar-write", "mail-write", "mail-send", "tasks-write"],
+          "clientId": "${M365_CLIENT_ID}",
+          "refreshToken": "${M365_REFRESH_TOKEN}"
+        }
+      }
+    }
+  }
+}
+```
 
----
+`clientSecret` is optional. Public PKCE clients do not have one.
+
+Direct mode is strictly a single-process fallback. It persists the authoritative
+refresh token at `~/.openclaw/state/m365-direct-token.json` by default, using an
+atomic replacement and restrictive permissions where supported. Override the
+path with `directTokenStatePath`, `M365_DIRECT_TOKEN_STATE_PATH`, or
+Once present, the state token takes precedence over configuration and
+environment values. Multiple plugin
+processes must use broker mode so only one process owns refresh-token rotation.
+
+## Least-privilege permissions
+
+Choose the narrowest delegated permission that supports the desired operation.
+
+| Feature | Desired capability | Minimum Microsoft Graph delegated permission |
+|---|---|---|
+| `mail-read` | List, search, read mail; download attachments; inbox webhook | `Mail.Read` |
+| `mail-write` | Move or flag mail; also enables mail reads | `Mail.ReadWrite` |
+| `mail-send` | Send, reply, or forward mail | `Mail.Send` |
+| `calendar-read` | Read calendars/events | `Calendars.Read` |
+| `calendar-write` | Create, update, delete events or meetings; also enables reads | `Calendars.ReadWrite` |
+| `tasks-read` | Read Microsoft To Do lists/tasks | `Tasks.Read` |
+| `tasks-write` | Create, update, complete, or delete tasks; also enables reads | `Tasks.ReadWrite` |
+| `onedrive-read` | List, search, inspect, or download OneDrive content | `Files.Read` |
+| `onedrive-write` | Upload, create, move, rename, or delete OneDrive content; also enables reads | `Files.ReadWrite` |
+| Login-only | Receive a reusable refresh token during login | `offline_access` |
+
+`*.ReadWrite` permissions include the corresponding reads, so selecting both
+read and write for the same feature is unnecessary.
+
+Permissions are enforced in three independent layers:
+
+1. the plugin registers only tools enabled by its configured `features`;
+2. the broker rejects scopes outside its own `M365_FEATURES` allowlist before
+   contacting Microsoft;
+3. Microsoft issues tokens only for delegated scopes actually consented by the
+   signed-in account.
+
+Configure the same feature list in the plugin and broker. The broker does not
+trust the plugin's list, and neither configuration can expand Microsoft consent.
+Unknown features and unrecognized broker scopes fail closed.
+
+> **Azure permission configuration is not consent.** Adding a delegated
+> permission in Azure does not grant the account access by itself. Re-run
+> `npm run login` with the new feature/scopes, complete the consent prompt, and
+> replace the refresh token owned by the broker. Stop the service and update the
+> `refreshToken` field in its state file while preserving subscription metadata,
+> then restart it. Merely changing plugin configuration does not expand the
+> scopes of an existing refresh token.
+
+Personal Microsoft accounts normally consent during login. Work/school tenants
+can apply policies that require an administrator to approve some or all
+delegated permissions. If the consent screen says approval is required, a tenant
+administrator must grant consent before login can mint a usable refresh token.
+
+For app-registration steps, account audiences, public PKCE clients, and
+confidential clients, see
+[docs/custom-app-registration.md](docs/custom-app-registration.md).
+
+## Configuration
+
+| Plugin field | Environment | Purpose |
+|---|---|---|
+| `clientId` | `M365_CLIENT_ID` | Azure application/client ID |
+| `clientSecret` | `M365_CLIENT_SECRET` | Optional confidential-client secret |
+| `refreshToken` | `M365_REFRESH_TOKEN` | Direct-mode refresh token |
+| `directTokenStatePath` | `M365_DIRECT_TOKEN_STATE_PATH`, then `~/.openclaw/state/m365-direct-token.json` | Direct-mode durable token state |
+| `tenant` | `M365_TENANT`, then `consumers` | OAuth tenant such as `consumers`, `common`, or a tenant ID |
+| `tokenBrokerUrl` | `M365_TOKEN_BROKER_URL` | Broker `/token` URL |
+| `tokenBrokerSecret` | `M365_TOKEN_BROKER_SECRET` | Broker bearer secret |
+| `features` | `M365_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Enabled tool capabilities; use the same list in the broker |
+| `personalCalendarNames` | `M365_PERSONAL_CALENDAR_NAMES` | Extra comma-separated personal calendar names |
+| `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
 
 ## Tools
 
-### Mail
+### Outlook mail, calendar, and task tools
 
-| Tool | Description |
-|------|-------------|
-| [`outlook_inbox`](#outlook_inbox) | List recent messages from inbox or another folder |
-| [`outlook_search`](#outlook_search) | Search messages by text, sender, subject, or date range |
-| [`outlook_read`](#outlook_read) | Read a specific message including full body |
-| [`outlook_save_attachments`](#outlook_save_attachments) | Save attachments from a message to a local directory |
-| [`outlook_send`](#outlook_send) | Send a plain-text email with optional attachments |
-| [`outlook_reply`](#outlook_reply) | Reply to a message with proper threading |
-| [`outlook_forward`](#outlook_forward) | Forward a message to new recipients |
-| [`outlook_move`](#outlook_move) | Move a message to a different folder |
-| [`outlook_flag`](#outlook_flag) | Flag, complete, or unflag a message |
+All existing names remain unchanged:
 
-### Calendar
+- Mail: `outlook_inbox`, `outlook_search`, `outlook_read`,
+  `outlook_save_attachments`, `outlook_send`, `outlook_reply`,
+  `outlook_forward`, `outlook_move`, `outlook_flag`
+- Calendar: `outlook_calendar_fetch`, `outlook_create_event`,
+  `outlook_update_event`, `outlook_delete_event`, `outlook_meeting`,
+  `outlook_query_events`
+- Tasks: `outlook_task_lists`, `outlook_tasks`, `outlook_create_task`,
+  `outlook_update_task`, `outlook_complete_task`, `outlook_delete_task`
 
-| Tool | Description |
-|------|-------------|
-| [`outlook_calendar_fetch`](#outlook_calendar_fetch) | Fetch upcoming events from personal, family, or all calendars |
-| [`outlook_create_event`](#outlook_create_event) | Create a new calendar event |
-| [`outlook_update_event`](#outlook_update_event) | Update an existing event by ID |
-| [`outlook_delete_event`](#outlook_delete_event) | Delete a calendar event by ID |
-| [`outlook_meeting`](#outlook_meeting) | Create a meeting and send invites to attendees |
-| [`outlook_query_events`](#outlook_query_events) | Query events by date range, text, attendee, or UID |
+### OneDrive tools
 
-### Tasks
+These tools are hidden by default. Enable `onedrive-read` for the read tools or
+`onedrive-write` for both read and write tools, in both plugin and broker config.
 
-| Tool | Description |
-|------|-------------|
-| [`outlook_task_lists`](#outlook_task_lists) | List Microsoft To Do lists available on the account |
-| [`outlook_tasks`](#outlook_tasks) | List tasks from a Microsoft To Do list |
-| [`outlook_create_task`](#outlook_create_task) | Create a Microsoft To Do task |
-| [`outlook_update_task`](#outlook_update_task) | Update an existing task |
-| [`outlook_complete_task`](#outlook_complete_task) | Mark a task complete |
-| [`outlook_delete_task`](#outlook_delete_task) | Delete a task |
+OneDrive accepts item IDs or drive-root-relative paths. Parameters that offer
+both forms reject ambiguous requests containing both.
 
----
+| Tool | Main parameters | Description |
+|---|---|---|
+| `onedrive_list` | `item_id` or `path`, `limit` | List root or folder children |
+| `onedrive_search` | `query`, `limit` | Search files and folders |
+| `onedrive_metadata` | `item_id` or `path` | Get item/root metadata |
+| `onedrive_download` | `item_id` or `path`, `output_path`, `overwrite` | Download locally; existing files are preserved by default |
+| `onedrive_upload` | `local_path`, `name`, `parent_id` or `parent_path`, `overwrite` | Simple upload up to 4 MiB |
+| `onedrive_create_folder` | `name`, `parent_id` or `parent_path` | Create a folder with conflict behavior `fail` |
+| `onedrive_move` | source `item_id` or `path`, `new_name`, destination `parent_id` or `parent_path` | Move and/or rename |
+| `onedrive_delete` | `item_id` or `path` | Delete an item |
 
-## Tool Reference
+Remote paths reject empty, `.` and `..` segments. Local downloads never
+overwrite unless `overwrite=true`. Uploads also refuse an existing remote name
+unless explicitly allowed.
 
-<a id="outlook_inbox"></a>
+## Token and state behavior
 
-### `outlook_inbox`
+- Access tokens are cached by normalized delegated-scope set until shortly
+  before expiration.
+- Token refresh is serialized, including across different scope sets, so
+  rotating refresh tokens cannot be reused concurrently.
+- The webhook service atomically writes rotated refresh tokens and subscription
+  metadata to one state file with restrictive permissions where supported.
+- Direct mode atomically writes its rotated refresh token to its own state file
+  and is supported only when exactly one plugin process uses that state.
+- A normal shutdown preserves the Graph subscription. Restarted services reuse
+  or renew it, avoiding notification gaps caused by delete-and-recreate.
+- Tokens and broker secrets are never written to logs.
 
-| Param | Type | Description |
-|-------|------|-------------|
-| `folder` | string | Folder name (default: `inbox`). Well-known names: `inbox`, `junkemail`, `deleteditems`, `sentitems`, `drafts`, `outbox`, `archive` |
-| `limit` | number | Max messages to return (default: `10`) |
-| `unread` | boolean | Only return unread messages |
+## Development
 
-<a id="outlook_search"></a>
-
-### `outlook_search`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `query` | string | Full-text search across subject and body |
-| `from` | string | Filter by sender email or domain |
-| `subject` | string | Subject substring filter |
-| `since` | string | Start date `YYYY-MM-DD` |
-| `before` | string | End date `YYYY-MM-DD` |
-| `limit` | number | Max results (default: `10`) |
-
-<a id="outlook_read"></a>
-
-### `outlook_read`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Microsoft Graph message ID |
-
-<a id="outlook_save_attachments"></a>
-
-### `outlook_save_attachments`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Microsoft Graph message ID |
-| `output_dir` | string | Local directory to save attachments into |
-| `content_types` | string[] | Content-type filters (default: `["image/*"]`) |
-
-<a id="outlook_send"></a>
-
-### `outlook_send`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `to` | string \| string[] | Recipient email address(es) |
-| `subject` | string | Email subject |
-| `body` | string | Plain-text body |
-| `cc` | string[] | CC recipients |
-| `attachment` | string[] | Local file path(s) to attach |
-| `in_reply_to` | string | Message-ID for threading (include angle brackets) |
-| `references` | string | Space-separated Message-IDs for full thread References header |
-| `signature` | string | Signature block appended after body |
-
-<a id="outlook_reply"></a>
-
-### `outlook_reply`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Graph message ID to reply to |
-| `body` | string | Reply body |
-| `reply_all` | boolean | Reply to all recipients (default: `false`) |
-| `signature` | string | Signature block |
-
-<a id="outlook_forward"></a>
-
-### `outlook_forward`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Graph message ID to forward |
-| `to` | string \| string[] | Recipient(s) to forward to |
-| `comment` | string | Optional note to prepend |
-
-<a id="outlook_move"></a>
-
-### `outlook_move`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Graph message ID to move |
-| `destination_folder` | string | Target folder name or well-known name |
-
-<a id="outlook_flag"></a>
-
-### `outlook_flag`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `message_id` | string | Graph message ID |
-| `flag_status` | string | `flagged`, `complete`, or `notFlagged` |
-
-<a id="outlook_calendar_fetch"></a>
-
-### `outlook_calendar_fetch`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `calendar` | string | `personal`, `family`, or `all` (default: `all`) |
-| `days` | number | Days ahead to fetch (default: `7`) |
-
-<a id="outlook_create_event"></a>
-
-### `outlook_create_event`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `subject` | string | Event title |
-| `start` | string | Start datetime ISO (e.g. `2026-03-15T14:00`) |
-| `duration` | string | Duration string e.g. `1h`, `30m` (default: `1h`; ignored if `end` supplied) |
-| `end` | string | End datetime ISO (overrides duration) |
-| `timezone` | string | IANA timezone (default: `America/Los_Angeles`) |
-| `location` | string | Event location |
-| `description` | string | Event description/body |
-| `attendees` | string[] | Attendee email addresses |
-| `calendar` | string | `personal` or `family` (default: `personal`) |
-
-<a id="outlook_update_event"></a>
-
-### `outlook_update_event`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `event_id` | string | Graph event ID (from `outlook_calendar_fetch`) |
-| `subject` | string | New title |
-| `start` | string | New start datetime ISO |
-| `end` | string | New end datetime ISO |
-| `duration` | string | New duration (if no `end`) |
-| `timezone` | string | IANA timezone for `start`/`end` |
-| `location` | string | New location |
-| `description` | string | New description |
-| `add_attendees` | string[] | Emails to add as attendees |
-| `remove_attendees` | string[] | Emails to remove from attendees |
-| `status` | string | `confirmed`, `tentative`, or `cancelled` |
-
-<a id="outlook_delete_event"></a>
-
-### `outlook_delete_event`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `event_id` | string | Graph event ID to delete |
-
-<a id="outlook_meeting"></a>
-
-### `outlook_meeting`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `to` | string \| string[] | Required attendee email(s) |
-| `cc` | string[] | Optional attendees (marked optional/informational) |
-| `subject` | string | Meeting title |
-| `start` | string | Start datetime ISO |
-| `duration` | string | Duration string (default: `1h`) |
-| `end` | string | End datetime ISO (overrides duration) |
-| `timezone` | string | IANA timezone (default: `America/Los_Angeles`) |
-| `location` | string | Meeting location |
-| `description` | string | Agenda / meeting notes |
-| `signature` | string | Signature block for the invite |
-
-<a id="outlook_query_events"></a>
-
-### `outlook_query_events`
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `after` | string | Events at or after this date (ISO, e.g. `2026-03-01`) |
-| `before` | string | Events before this date (ISO, e.g. `2026-04-01`) |
-| `text` | string | Filter by title/description text |
-| `attendee` | string | Filter to events including this attendee email |
-| `uid` | string | Return the single event with this exact iCalUId |
-
----
-
-## Building
-
-```bash
-cd plugins/outlook
-npm install && npm run build
-node dist/bin/outlook.js --help
+```powershell
+npm install
+npm test
+npm run build
 ```
 
-Built with [Carapace Plugin SDK](https://github.com/JeffSteinbok/carapace-plugin-sdk).
+`npm test` covers the plugin, shared token manager, OneDrive tools, and token
+broker. `npm run build` builds the shared auth package, plugin/CLI/adapter, and
+standalone webhook service.

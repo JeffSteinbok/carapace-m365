@@ -1,0 +1,16 @@
+{
+  "name": "@carapace/m365-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup --config tsup.config.ts"
+  },
+  "dependencies": {
+    "carapace-mail-runtime": "git+https://github.com/JeffSteinbok/carapace-mail-runtime.git#175b1663fd7e2bac256a550b05e94b5532cf4765"
+  },
+  "devDependencies": {
+    "@carapace/m365-graph-auth": "1.0.0"
+  }
+}

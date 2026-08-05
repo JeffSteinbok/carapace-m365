@@ -1,3 +1,12 @@
 {
-  "extends": "carapace-plugin-sdk/tsconfig.base.json"
+  "extends": "carapace-plugin-sdk/tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src",
+    "packages/m365-graph-auth/src"
+  ]
 }

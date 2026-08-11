@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@carapace/m365-graph-auth": "1.0.0",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.2.0",
     "carapace-plugin-sdk": "^1.0.3",
     "tsup": "^8.3.0",
     "typescript": "^7",

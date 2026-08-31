@@ -51,6 +51,12 @@ const CALENDAR_DEFAULTS: Record<string, string[]> = {
 };
 const TASK_LIST_DEFAULTS = ["tasks", "to do"];
 
+function taskReadScopes(config: OutlookCalendarConfig): readonly string[] {
+  return isM365FeatureEnabled(config.features, "tasks-write")
+    ? SCOPES.tasksWrite
+    : SCOPES.tasksRead;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
@@ -795,6 +801,58 @@ export async function saveAttachments(
 // Send / Reply / Forward / Move / Flag handlers
 // ---------------------------------------------------------------------------
 
+export async function saveDraft(
+  config: OutlookMailConfig,
+  params: {
+    to?: string | string[];
+    cc?: string[];
+    subject?: string;
+    body?: string;
+    signature?: string;
+    attachment?: string[];
+    in_reply_to?: string;
+  },
+): Promise<unknown> {
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
+
+  const toList = params.to ? (Array.isArray(params.to) ? params.to : [params.to]) : [];
+  const bodyText = params.signature ? `${params.body ?? ""}\n\n${params.signature}` : (params.body ?? "");
+
+  const message: Record<string, unknown> = {
+    subject: params.subject ?? "",
+    body: { contentType: "Text", content: bodyText },
+  };
+  if (toList.length) {
+    message.toRecipients = toList.map(e => ({ emailAddress: { address: e.trim() } }));
+  }
+  if (params.cc?.length) {
+    message.ccRecipients = params.cc.map(e => ({ emailAddress: { address: e.trim() } }));
+  }
+  if (params.in_reply_to) {
+    message.internetMessageHeaders = [{ name: "In-Reply-To", value: params.in_reply_to }];
+  }
+  if (params.attachment?.length) {
+    const { readFile } = await import("node:fs/promises");
+    const { basename } = await import("node:path");
+    const attachments: Array<Record<string, unknown>> = [];
+    for (const filepath of params.attachment) {
+      const data = await readFile(filepath);
+      attachments.push({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: basename(filepath),
+        contentBytes: data.toString("base64"),
+      });
+    }
+    message.attachments = attachments;
+  }
+
+  const res = await graphPost(token, "/me/messages", message) as Record<string, unknown>;
+  if (res.error) return { error: JSON.stringify(res.error) };
+  return { ok: true, draft_id: res.id, message: `✓ Draft saved: ${params.subject ?? "(no subject)"}` };
+}
+
 export async function sendMessage(
   config: OutlookMailConfig,
   params: {
@@ -955,7 +1013,7 @@ export async function listTaskListsHandler(
 ): Promise<unknown> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
-  const token = await getGraphAccessToken(config, SCOPES.tasksRead);
+  const token = await getGraphAccessToken(config, taskReadScopes(config));
   const lists = await listTaskLists(token);
   return {
     count: lists.length,
@@ -973,7 +1031,7 @@ export async function listTasks(
 ): Promise<unknown> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
-  const token = await getGraphAccessToken(config, SCOPES.tasksRead);
+  const token = await getGraphAccessToken(config, taskReadScopes(config));
   const resolved = await resolveTaskList(token, params.task_list);
   const data = await graphGet(token, `/me/todo/lists/${encodeURIComponent(resolved.id)}/tasks?$top=100`) as { value: Array<Record<string, unknown>> };
   let tasks = (data.value ?? []).map(formatTask);

@@ -31,6 +31,7 @@ import {
   handleValidation,
   readBody,
 } from "./handlers.js";
+import { MailStore } from "@carapace/m365-mail-store";
 import { StateStore } from "./state.js";
 
 export interface TokenSource {
@@ -135,6 +136,7 @@ export function createServiceServer(options: {
   notifyTarget?: string;
   pipelineWorkspace?: string;
   notificationStore?: StateStore;
+  mailStore?: MailStore;
 }): http.Server {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -182,6 +184,7 @@ export function createServiceServer(options: {
         notifyTarget: options.notifyTarget,
         pipelineWorkspace: options.pipelineWorkspace,
         notificationStore: options.notificationStore,
+        mailStore: options.mailStore,
       });
     } catch (error) {
       log(`error handling webhook request: ${error}`);
@@ -318,6 +321,11 @@ export async function main(): Promise<void> {
     // The runtime config is optional and may not exist yet.
   }
 
+  const mailStore = new MailStore(config.mailStorePath);
+  if (mailStore.enabled) {
+    log(`mail store enabled at ${config.mailStorePath} (${mailStore.count()} messages)`);
+  }
+
   const server = createServiceServer({
     config,
     tokenSource: tokens,
@@ -330,6 +338,7 @@ export async function main(): Promise<void> {
     notifyTarget: config.notifyTarget,
     pipelineWorkspace: config.pipelineWorkspace,
     notificationStore: store,
+    mailStore,
   });
   await new Promise<void>((resolve) => {
     server.listen(config.port, config.bind, () => {
@@ -362,6 +371,7 @@ export async function main(): Promise<void> {
     watcher?.close();
     server.close(() => {
       log("server closed");
+      mailStore.close();
       process.exit(0);
     });
     setTimeout(() => process.exit(0), 5_000).unref();

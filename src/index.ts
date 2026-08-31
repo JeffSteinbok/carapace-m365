@@ -25,6 +25,7 @@ import {
   searchMail,
   readMessage,
   saveAttachments,
+  saveDraft,
   sendMessage,
   replyToMessage,
   forwardMessage,
@@ -158,6 +159,28 @@ const createBaseEntry = definePlugin({
       async execute({ message_id, output_dir, content_types }, config) {
         try {
           return await saveAttachments(resolveConfig(config), { message_id, output_dir, content_types });
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_save_draft",
+      label: "Outlook Save Draft",
+      description: "Save a draft email to the Outlook Drafts folder. All fields are optional — useful for saving a partial draft before sending.",
+      parameters: Type.Object({
+        to: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String())], { description: "Recipient email address(es)." })),
+        subject: Type.Optional(Type.String({ description: "Email subject line." })),
+        body: Type.Optional(Type.String({ description: "Plain-text email body." })),
+        cc: Type.Optional(Type.Array(Type.String(), { description: "CC recipient email address(es)." })),
+        attachment: Type.Optional(Type.Array(Type.String(), { description: "File path(s) to attach." })),
+        in_reply_to: Type.Optional(Type.String({ description: "Message-ID of the email being replied to (for threading)." })),
+        signature: Type.Optional(Type.String({ description: "Signature block appended after body." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await saveDraft(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
         }
@@ -505,6 +528,50 @@ const createBaseEntry = definePlugin({
     }),
 
     // -------------------------------------------------------------------------
+    // Mail store tool
+    // -------------------------------------------------------------------------
+
+    tool({
+      name: "outlook_search_store",
+      label: "Outlook Search Store",
+      description: "Query the local SQLite mail cache for fast message lookup without hitting the Graph API. Returns graph_id (for reply/forward), internet_message_id (for threading), sender, subject, and date. Only available when M365_MAIL_STORE_PATH is configured.",
+      parameters: Type.Object({
+        graph_id: Type.Optional(Type.String({ description: "Look up a single message by Microsoft Graph ID (takes priority over search filters, returns one row or null)." })),
+        sender_email: Type.Optional(Type.String({ description: "Filter by sender email address." })),
+        subject_contains: Type.Optional(Type.String({ description: "Substring match on subject." })),
+        since: Type.Optional(Type.String({ description: "ISO datetime lower bound for received_at." })),
+        before: Type.Optional(Type.String({ description: "ISO datetime upper bound for received_at." })),
+        limit: Type.Optional(Type.Integer({ description: "Maximum number of results to return (default 20, max 50)." })),
+      }),
+      async execute({ graph_id, sender_email, subject_contains, since, before, limit }) {
+        const storePath = process.env.M365_MAIL_STORE_PATH?.trim();
+        if (!storePath) {
+          return { error: "Mail store is not configured (M365_MAIL_STORE_PATH not set)" };
+        }
+        // Dynamic import avoids bundling node:sqlite into the plugin bundle;
+        // node:sqlite is a Node built-in (v22+) that must stay external.
+        const { MailStore } = await import("@carapace/m365-mail-store");
+        const store = new MailStore(storePath);
+        try {
+          if (graph_id) {
+            const row = store.getByGraphId(graph_id);
+            return { result: row };
+          }
+          const rows = store.search({
+            sender_email,
+            subject_contains,
+            since,
+            before,
+            limit: Math.min(limit ?? 20, 50),
+          });
+          return { results: rows, count: rows.length };
+        } finally {
+          store.close();
+        }
+      },
+    }),
+
+    // -------------------------------------------------------------------------
     // OneDrive tools
     // -------------------------------------------------------------------------
 
@@ -662,6 +729,7 @@ export const TOOL_REQUIRED_FEATURE = {
   outlook_search: "mail-read",
   outlook_read: "mail-read",
   outlook_save_attachments: "mail-read",
+  outlook_save_draft: "mail-write",
   outlook_send: "mail-send",
   outlook_reply: "mail-send",
   outlook_forward: "mail-send",
@@ -687,6 +755,7 @@ export const TOOL_REQUIRED_FEATURE = {
   onedrive_create_folder: "onedrive-write",
   onedrive_move: "onedrive-write",
   onedrive_delete: "onedrive-write",
+  outlook_search_store: "mail-read",
 } as const satisfies Record<string, M365Feature>;
 
 function configuredFeatures(config: Record<string, unknown> | undefined): M365Feature[] {

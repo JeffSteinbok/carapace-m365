@@ -45,6 +45,8 @@ export interface ServiceConfig {
   initialRefreshToken?: string;
   notifyTarget: string;
   notifyChannel: string;
+  /** Path to SQLite mail store DB. Undefined = feature disabled. */
+  mailStorePath?: string;
 }
 
 export function log(message: string): void {
@@ -118,6 +120,7 @@ export function loadServiceConfig(): ServiceConfig {
     initialRefreshToken: env("M365_REFRESH_TOKEN") || undefined,
     notifyTarget: required(process.env.NOTIFY_TARGET?.trim() || "", "NOTIFY_TARGET"),
     notifyChannel: process.env.NOTIFY_CHANNEL?.trim() || "discord",
+    mailStorePath: env("M365_MAIL_STORE_PATH") || undefined,
   };
 }
 

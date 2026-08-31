@@ -7,6 +7,7 @@ import {
 import { log, type MailRule } from "./config.js";
 import { dispatchResults } from "./dispatch.js";
 import { GraphClient, type GraphMessage } from "./graph.js";
+import { MailStore } from "@carapace/m365-mail-store";
 import { OutlookProviderClient } from "./provider.js";
 import { StateStore } from "./state.js";
 
@@ -93,6 +94,7 @@ export async function handleNotification(
     notifyTarget: string;
     pipelineWorkspace: string;
     notificationStore?: StateStore;
+    mailStore?: MailStore;
   },
 ): Promise<void> {
   let parsed: GraphNotificationBody;
@@ -127,6 +129,26 @@ export async function handleNotification(
       const message = await options.graph.fetchMessage(messageId);
       const envelope = messageToEnvelope(message);
       log(`received: "${envelope.subject}" from ${envelope.sender_email}`);
+
+      if (options.mailStore?.enabled) {
+        const internetMessageId = message.internetMessageHeaders
+          ?.find((h) => h.name.toLowerCase() === "message-id")
+          ?.value ?? null;
+        options.mailStore.store({
+          graph_id: message.id,
+          internet_message_id: internetMessageId,
+          subject: envelope.subject,
+          sender_email: envelope.sender_email,
+          sender_name: envelope.sender_name,
+          received_at: envelope.received_at ?? null,
+          has_attachments: envelope.has_attachments ? 1 : 0,
+          body_preview: message.bodyPreview ?? null,
+          raw_json: JSON.stringify(message),
+          stored_at: new Date().toISOString(),
+        });
+        log(`mail-store: stored message ${message.id}`);
+      }
+
       const [, results] = await executeRules(
         envelope,
         options.pipelineRules as Record<string, unknown>[],

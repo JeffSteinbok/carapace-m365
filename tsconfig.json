@@ -7,6 +7,7 @@
   },
   "include": [
     "src",
-    "packages/m365-graph-auth/src"
+    "packages/m365-graph-auth/src",
+    "packages/m365-mail-store/src"
   ]
 }

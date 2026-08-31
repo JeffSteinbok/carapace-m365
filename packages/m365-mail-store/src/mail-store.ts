@@ -8,7 +8,30 @@
  * existing databases are forward-compatible without migration scripts.
  */
 
-import { DatabaseSync, type StatementSync, type SQLInputValue } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync, StatementSync, SQLInputValue } from "node:sqlite";
+
+const requireSqlite = createRequire(import.meta.url);
+
+/**
+ * Loads `node:sqlite` on demand.
+ *
+ * The module is only available on Node 22.5+, and the store is optional, so
+ * this is resolved lazily rather than imported at module load. That keeps the
+ * disabled path a true no-op on runtimes without it — importing statically
+ * would make every consumer require Node 22.5+ even with the store switched
+ * off.
+ */
+function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } {
+  try {
+    return requireSqlite("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync };
+  } catch (cause) {
+    throw new Error(
+      "M365_MAIL_STORE_PATH is set but `node:sqlite` is unavailable. The mail store requires Node 22.5 or newer; unset the variable to run without it.",
+      { cause },
+    );
+  }
+}
 
 export interface StoredMessage {
   /** Microsoft Graph message ID — use for reply/forward API calls */
@@ -85,6 +108,7 @@ export class MailStore {
   constructor(path: string | undefined) {
     if (!path) return; // disabled
 
+    const { DatabaseSync } = loadSqlite();
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA synchronous=NORMAL;");

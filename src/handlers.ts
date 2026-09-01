@@ -899,6 +899,142 @@ export async function flagMessage(
 }
 
 // ---------------------------------------------------------------------------
+// markMessage — patch read/flag/importance in one call
+// ---------------------------------------------------------------------------
+
+export async function markMessage(
+  config: OutlookMailConfig,
+  params: {
+    message_id: string;
+    read?: boolean;
+    flag_status?: "flagged" | "notFlagged" | "complete";
+    importance?: "normal" | "high" | "low";
+  },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const msgId = params.message_id?.trim();
+  if (!msgId) return { error: "message_id is required" };
+
+  const patch: Record<string, unknown> = {};
+  if (params.read !== undefined) patch.isRead = params.read;
+  if (params.flag_status !== undefined) patch.flag = { flagStatus: params.flag_status };
+  if (params.importance !== undefined) patch.importance = params.importance;
+  if (Object.keys(patch).length === 0) return { error: "At least one of read, flag_status, or importance must be provided" };
+
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const res = await graphPatch(token, `/me/messages/${encodeURIComponent(msgId)}`, patch) as Record<string, unknown>;
+  if (res.error) return { error: JSON.stringify(res.error) };
+  return { ok: true, ...patch };
+}
+
+// ---------------------------------------------------------------------------
+// labelMessage — add/remove Outlook categories
+// ---------------------------------------------------------------------------
+
+export async function labelMessage(
+  config: OutlookMailConfig,
+  params: {
+    message_id: string;
+    add?: string[];
+    remove?: string[];
+  },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const msgId = params.message_id?.trim();
+  if (!msgId) return { error: "message_id is required" };
+  if (!params.add?.length && !params.remove?.length) return { error: "At least one of add or remove must be provided" };
+
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+
+  // Fetch current categories
+  const current = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}?$select=categories`) as Record<string, unknown>;
+  const currentCats: string[] = (current.categories as string[] | undefined) ?? [];
+
+  // Compute updated set (case-insensitive deduplication)
+  const removeSet = new Set((params.remove ?? []).map(c => c.toLowerCase()));
+  const kept = currentCats.filter(c => !removeSet.has(c.toLowerCase()));
+  const keptLower = new Set(kept.map(c => c.toLowerCase()));
+  const toAdd = (params.add ?? []).filter(c => !keptLower.has(c.toLowerCase()));
+  const newCats = [...kept, ...toAdd];
+
+  const res = await graphPatch(token, `/me/messages/${encodeURIComponent(msgId)}`, { categories: newCats }) as Record<string, unknown>;
+  if (res.error) return { error: JSON.stringify(res.error) };
+  return { ok: true, categories: newCats };
+}
+
+// ---------------------------------------------------------------------------
+// deleteMessage — soft or permanent delete
+// ---------------------------------------------------------------------------
+
+export async function deleteMessage(
+  config: OutlookMailConfig,
+  params: { message_id: string; permanent?: boolean },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const msgId = params.message_id?.trim();
+  if (!msgId) return { error: "message_id is required" };
+
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+
+  if (params.permanent) {
+    // Hard delete — irrecoverable
+    const res = await graphPost(token, `/me/messages/${encodeURIComponent(msgId)}/permanentDelete`, {}) as Record<string, unknown>;
+    if (res.error) return { error: JSON.stringify(res.error) };
+    return { ok: true, permanent: true, message_id: msgId };
+  } else {
+    // Soft delete — moves to Deleted Items
+    const res = await httpRequest("DELETE", `${GRAPH_BASE}/me/messages/${encodeURIComponent(msgId)}`, token);
+    if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
+      return { ok: true, permanent: false, message_id: msgId };
+    }
+    const err = (() => { try { return JSON.parse(res.data ?? "{}"); } catch { return {}; } })();
+    return { error: `Graph API error ${res.status}: ${(err as Record<string, Record<string, string>>)?.error?.message ?? res.data}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// listOrCreateFolder — list mail folders or create one
+// ---------------------------------------------------------------------------
+
+export async function listOrCreateFolder(
+  config: OutlookMailConfig,
+  params: { create_name?: string },
+): Promise<unknown> {
+  const { clientId, clientSecret, refreshToken } = config;
+  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+
+  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+
+  if (params.create_name?.trim()) {
+    const res = await graphPost(token, "/me/mailFolders", { displayName: params.create_name.trim() }) as Record<string, unknown>;
+    if (res.error) return { error: JSON.stringify(res.error) };
+    return {
+      ok: true,
+      created: true,
+      folder: {
+        id: String(res.id ?? ""),
+        name: String(res.displayName ?? params.create_name),
+        total_items: Number(res.totalItemCount ?? 0),
+        unread_items: Number(res.unreadItemCount ?? 0),
+      },
+    };
+  }
+
+  // List all top-level mail folders
+  const data = await graphGet(token, "/me/mailFolders?$top=100&$select=id,displayName,totalItemCount,unreadItemCount") as { value: Array<Record<string, unknown>> };
+  const folders = (data.value ?? []).map(f => ({
+    id: String(f.id ?? ""),
+    name: String(f.displayName ?? ""),
+    total_items: Number(f.totalItemCount ?? 0),
+    unread_items: Number(f.unreadItemCount ?? 0),
+  }));
+  return { count: folders.length, folders };
+}
+
+// ---------------------------------------------------------------------------
 // To Do / Tasks handlers
 // ---------------------------------------------------------------------------
 

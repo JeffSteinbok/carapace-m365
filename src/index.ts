@@ -31,6 +31,10 @@ import {
   forwardMessage,
   moveMessage,
   flagMessage,
+  markMessage,
+  labelMessage,
+  deleteMessage,
+  listOrCreateFolder,
   listTaskListsHandler,
   listTasks,
   createTask,
@@ -275,6 +279,76 @@ const createBaseEntry = definePlugin({
       async execute(params, config) {
         try {
           return await flagMessage(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_mark",
+      label: "Outlook Mark",
+      description: "Mark an Outlook message as read/unread, flagged/unflagged, or set importance in a single call.",
+      parameters: Type.Object({
+        message_id: Type.String({ description: "The Microsoft Graph message ID to update." }),
+        read: Type.Optional(Type.Boolean({ description: "true = mark as read, false = mark as unread." })),
+        flag_status: Type.Optional(Type.Union([Type.Literal("flagged"), Type.Literal("notFlagged"), Type.Literal("complete")], { description: "Flag status: 'flagged', 'notFlagged', or 'complete'." })),
+        importance: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")], { description: "Message importance level." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await markMessage(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_label",
+      label: "Outlook Label",
+      description: "Add or remove Outlook categories (color-coded labels) from a message.",
+      parameters: Type.Object({
+        message_id: Type.String({ description: "The Microsoft Graph message ID to update." }),
+        add: Type.Optional(Type.Array(Type.String(), { description: "Category names to add to the message." })),
+        remove: Type.Optional(Type.Array(Type.String(), { description: "Category names to remove from the message." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await labelMessage(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_delete",
+      label: "Outlook Delete",
+      description: "Delete an Outlook message. Soft delete (moves to Deleted Items) by default; use permanent=true for irrecoverable deletion.",
+      parameters: Type.Object({
+        message_id: Type.String({ description: "The Microsoft Graph message ID to delete." }),
+        permanent: Type.Optional(Type.Boolean({ description: "If true, permanently delete the message (irrecoverable). Default: false (moves to Deleted Items)." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await deleteMessage(resolveConfig(config), params);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      },
+    }),
+
+    tool({
+      name: "outlook_folders",
+      label: "Outlook Folders",
+      description: "List all Outlook mail folders with their IDs. Optionally create a new folder at the root level.",
+      parameters: Type.Object({
+        create_name: Type.Optional(Type.String({ description: "Name of a new folder to create at the root level. Omit to just list folders." })),
+      }),
+      async execute(params, config) {
+        try {
+          return await listOrCreateFolder(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
         }

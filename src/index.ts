@@ -430,6 +430,8 @@ const createBaseEntry = definePlugin({
         description: Type.Optional(Type.String({ description: "Event description / agenda." })),
         attendees: Type.Optional(Type.Array(Type.String(), { description: "Attendee email addresses." })),
         calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family")], { description: "Target calendar (default: personal)." })),
+        is_all_day: Type.Optional(Type.Boolean({ description: "Create as an all-day event. `start` and `end` are treated as dates; `end` is the last day covered (inclusive)." })),
+        show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
       }),
       async execute(params, config) {
         try {
@@ -455,7 +457,9 @@ const createBaseEntry = definePlugin({
         description: Type.Optional(Type.String({ description: "New description." })),
         add_attendees: Type.Optional(Type.Array(Type.String(), { description: "Email addresses to add as attendees." })),
         remove_attendees: Type.Optional(Type.Array(Type.String(), { description: "Email addresses to remove from attendees." })),
-        status: Type.Optional(Type.Union([Type.Literal("confirmed"), Type.Literal("tentative"), Type.Literal("cancelled")], { description: "Update event status." })),
+        status: Type.Optional(Type.Union([Type.Literal("confirmed"), Type.Literal("tentative"), Type.Literal("cancelled")], { description: "Update event status. Note: 'cancelled' also cancels the event — use show_as to change free/busy only." })),
+        is_all_day: Type.Optional(Type.Boolean({ description: "Convert to/from an all-day event. When true, start/end snap to whole days (end inclusive) and free/busy defaults to free." })),
+        show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
       }),
       async execute(params, config) {
         try {
@@ -510,13 +514,14 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_query_events",
       label: "Outlook Query Events",
-      description: "Query calendar events by date range, text, attendee email, or iCalUId.",
+      description: "Query calendar events by date range, text, attendee email, or iCalUId. Date ranges expand recurring events and include all-day and multi-day events overlapping the range.",
       parameters: Type.Object({
-        after: Type.Optional(Type.String({ description: "Only events starting at or after this date (ISO, e.g. 2026-03-01)." })),
-        before: Type.Optional(Type.String({ description: "Only events starting before this date (ISO, e.g. 2026-04-01)." })),
+        after: Type.Optional(Type.String({ description: "First day to include (ISO date, e.g. 2026-03-01). Defaults to today when only `before` is given." })),
+        before: Type.Optional(Type.String({ description: "Last day to include, inclusive (ISO date, e.g. 2026-04-01). Pass the same value as `after` to query a single day." })),
         text: Type.Optional(Type.String({ description: "Filter by text match on title." })),
         attendee: Type.Optional(Type.String({ description: "Filter to events including this attendee email." })),
         uid: Type.Optional(Type.String({ description: "Return the single event with this exact iCalUId." })),
+        calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family")], { description: "Which calendar to query when using a date range (default: the default calendar)." })),
       }),
       async execute(params, config) {
         try {

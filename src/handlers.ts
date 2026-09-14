@@ -61,9 +61,9 @@ function taskReadScopes(config: OutlookCalendarConfig): readonly string[] {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-function httpGet(url: string, token: string): Promise<string> {
+function httpGet(url: string, token: string, extraHeaders: Record<string, string> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { method: "GET", headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, timeout: 30_000 }, res => {
+    const req = https.request(url, { method: "GET", headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...extraHeaders }, timeout: 30_000 }, res => {
       let data = ""; res.on("data", (c: Buffer) => data += c); res.on("end", () => resolve(data));
     });
     req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); }); req.end();
@@ -211,8 +211,8 @@ function httpPatch(url: string, body: string, token: string): Promise<string> {
   });
 }
 
-async function graphGet(token: string, path: string): Promise<unknown> {
-  const res = await httpGet(`${GRAPH_BASE}${path}`, token);
+async function graphGet(token: string, path: string, extraHeaders: Record<string, string> = {}): Promise<unknown> {
+  const res = await httpGet(`${GRAPH_BASE}${path}`, token, extraHeaders);
   return JSON.parse(res);
 }
 
@@ -322,6 +322,7 @@ function formatEvent(e: Record<string, unknown>): Record<string, unknown> {
     location: ((e.location as Record<string, string>)?.displayName || "No location"),
     organizer: ((e.organizer as Record<string, Record<string, string>>)?.emailAddress?.name || ((e.organizer as Record<string, Record<string, string>>)?.emailAddress?.address ?? "")),
     my_status: ((e.responseStatus as Record<string, string>)?.response ?? "none"), show_as: String(e.showAs ?? "busy"),
+    is_all_day: Boolean(e.isAllDay),
   };
   if (attendees.length) result.attendees = attendees;
   const bodyObj = e.body as Record<string, string> | undefined;
@@ -407,7 +408,7 @@ export async function fetchCalendar(
     const searchNames = calendarSearchNames(config, key);
     const calId = searchNames.map(n => calMap[n]).find(Boolean);
     if (!calId) { results[key] = { label: key, error: `Calendar not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] }; continue; }
-    const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,body", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
+    const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
     const evData = await graphGet(token, `/me/calendars/${calId}/calendarView?${qp}`) as { value: Array<Record<string, unknown>> };
     const events = (evData.value ?? []).map(formatEvent);
     results[key] = { label: key === "personal" ? "Personal" : "Family", count: events.length, start_date: start, end_date: end, events };
@@ -418,6 +419,8 @@ export async function fetchCalendar(
 export interface CreateEventParams {
   subject: string;
   start: string;
+  is_all_day?: boolean;
+  show_as?: string;
   duration?: string;
   end?: string;
   timezone?: string;
@@ -458,11 +461,22 @@ export async function createEvent(
   calId = searchNames.map(n => calMap[n]).find(Boolean);
   if (!calId) return { error: `Calendar '${calKey}' not found. Available: ${Object.keys(calMap).join(", ")}` };
 
-  const body: Record<string, unknown> = {
-    subject: params.subject,
-    start: toGraphDateTime(params.start, timezone),
-    end: toGraphDateTime(endIso, timezone),
-  };
+  const body: Record<string, unknown> = { subject: params.subject };
+  if (params.is_all_day) {
+    // Graph requires all-day events to sit on midnight boundaries with an
+    // exclusive end, i.e. the midnight after the last day the event covers.
+    const startDay = params.start.slice(0, 10);
+    const lastDay = params.end ? params.end.slice(0, 10) : startDay;
+    body.isAllDay = true;
+    body.start = { dateTime: `${startDay}T00:00:00`, timeZone: timezone };
+    body.end = { dateTime: `${addDays(lastDay, 1)}T00:00:00`, timeZone: timezone };
+  } else {
+    body.start = toGraphDateTime(params.start, timezone);
+    body.end = toGraphDateTime(endIso, timezone);
+  }
+  // Outlook shows all-day events as Free by default; keep that unless asked.
+  if (params.show_as) body.showAs = params.show_as;
+  else if (params.is_all_day) body.showAs = "free";
   if (params.location) body.location = { displayName: params.location };
   if (params.description) body.body = { contentType: "text", content: params.description };
   if (params.attendees?.length) {
@@ -493,6 +507,8 @@ export async function createEvent(
 export interface UpdateEventParams {
   event_id: string;
   subject?: string;
+  is_all_day?: boolean;
+  show_as?: string;
   start?: string;
   end?: string;
   duration?: string;
@@ -536,6 +552,45 @@ export async function updateEvent(
     }
   } else if (params.end) {
     patch.end = toGraphDateTime(params.end, timezone);
+  }
+
+  // Explicit free/busy wins over the coarse `status` mapping above. (`status`
+  // could only reach "free" via "cancelled", which also cancels the event.)
+  if (params.show_as) patch.showAs = params.show_as;
+
+  if (params.is_all_day !== undefined) {
+    patch.isAllDay = params.is_all_day;
+    if (params.is_all_day) {
+      // Switching to all-day requires midnight-aligned start/end with an
+      // exclusive end date. Fall back to the event's current dates when the
+      // caller did not supply them.
+      let startDay = params.start?.slice(0, 10);
+      let lastDay = params.end?.slice(0, 10);
+      if (!startDay || !lastDay) {
+        // Must request the calendar timezone: without it Graph answers in UTC,
+        // so a local midnight reads back as e.g. 07:00 and the exclusive-end
+        // correction below would not fire, shifting the event a day later.
+        const cur = await graphGet(
+          token,
+          `/me/events/${params.event_id}?$select=start,end`,
+          { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` },
+        ) as Record<string, unknown>;
+        const curStartIso = String((cur.start as Record<string, string> | undefined)?.dateTime ?? "");
+        const curEndIso = String((cur.end as Record<string, string> | undefined)?.dateTime ?? "");
+        startDay = startDay ?? curStartIso.slice(0, 10);
+        if (!lastDay) {
+          // Preserve the span of a multi-day event. An end of exactly midnight
+          // is exclusive, so the last covered day is the day before it.
+          const curEndDay = curEndIso.slice(0, 10);
+          const endsAtMidnight = curEndIso.slice(11, 16) === "00:00";
+          const derived = curEndDay && endsAtMidnight ? addDays(curEndDay, -1) : curEndDay;
+          lastDay = derived && derived >= startDay ? derived : startDay;
+        }
+      }
+      patch.start = { dateTime: `${startDay}T00:00:00`, timeZone: timezone };
+      patch.end = { dateTime: `${addDays(lastDay, 1)}T00:00:00`, timeZone: timezone };
+      if (!params.show_as && !params.status) patch.showAs = "free";
+    }
   }
 
   // Attendee merge: fetch current, diff, patch full list
@@ -678,6 +733,23 @@ export interface QueryEventsParams {
   text?: string;
   attendee?: string;
   uid?: string;
+  calendar?: string;
+}
+
+/** Calendar timezone used when interpreting and returning query results. */
+const QUERY_TIMEZONE = "America/Los_Angeles";
+
+/** Today's date in QUERY_TIMEZONE as YYYY-MM-DD (toISOString would give UTC). */
+function todayLocalDate(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: QUERY_TIMEZONE });
+}
+
+/** Shift a YYYY-MM-DD date string by N days without timezone drift. */
+function addDays(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
 }
 
 export async function queryEvents(
@@ -695,26 +767,70 @@ export async function queryEvents(
     return { events: (res.value ?? []).map(formatEvent) };
   }
 
-  const filters: string[] = [];
-  if (params.after) filters.push(`start/dateTime ge '${params.after}T00:00:00'`);
-  if (params.before) filters.push(`end/dateTime le '${params.before}T23:59:59'`);
-  if (params.text) filters.push(`contains(subject,'${esc(params.text)}')`);
+  const applyFilters = (events: Array<Record<string, unknown>>) => {
+    let out = events;
+    if (params.text) {
+      const needle = params.text.toLowerCase();
+      out = out.filter(e => String(e.subject ?? "").toLowerCase().includes(needle));
+    }
+    if (params.attendee) {
+      const att = params.attendee.toLowerCase();
+      out = out.filter(e =>
+        (e.attendees as Array<Record<string, string>> | undefined)?.some(
+          a => a.email?.toLowerCase() === att,
+        ),
+      );
+    }
+    return out;
+  };
 
-  const qs = filters.length
-    ? `?$filter=${encodeURIComponent(filters.join(" and "))}&$top=50&$orderby=start/dateTime`
-    : `?$top=20&$orderby=start/dateTime`;
+  // Date-bounded queries go through calendarView rather than /me/events.
+  // /me/events returns recurring series masters (not their occurrences) and
+  // filtering it on start/end drops all-day and multi-day events that straddle
+  // a boundary. calendarView expands recurrences and returns anything
+  // overlapping the window, which is what a "what's on this date" query means.
+  if (params.after || params.before) {
+    const startDate = params.after ?? todayLocalDate();
+    const lastDay = params.before ?? addDays(startDate, 90);
+    // `before` names a day the caller wants included, so the half-open window
+    // runs to the start of the following day.
+    const qp = new URLSearchParams({
+      "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body",
+      "$orderby": "start/dateTime",
+      "$top": "200",
+      startDateTime: `${startDate}T00:00:00`,
+      endDateTime: `${addDays(lastDay, 1)}T00:00:00`,
+    }).toString();
 
-  const res = await graphGet(token, `/me/events${qs}`) as { value: Array<Record<string, unknown>> };
-  let events = (res.value ?? []).map(formatEvent);
+    // Without an explicit calendar this queries the default calendar only.
+    // "personal"/"family" resolve by name the same way outlook_calendar_fetch does.
+    let viewPath = `/me/calendarView?${qp}`;
+    if (params.calendar && params.calendar !== "default") {
+      const calData = await graphGet(token, "/me/calendars?$select=id,name&$top=50") as { value: Array<{ name: string; id: string }> };
+      const calMap: Record<string, string> = {};
+      for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
+      const calId = calendarSearchNames(config, params.calendar).map(n => calMap[n]).find(Boolean);
+      if (!calId) {
+        return { error: `Calendar "${params.calendar}" not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] };
+      }
+      viewPath = `/me/calendars/${calId}/calendarView?${qp}`;
+    }
 
-  if (params.attendee) {
-    const att = params.attendee.toLowerCase();
-    events = events.filter(e =>
-      (e.attendees as Array<Record<string, string>>)?.some(
-        (a: Record<string, string>) => a.email?.toLowerCase() === att,
-      ),
-    );
+    const res = await graphGet(
+      token,
+      viewPath,
+      { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` },
+    ) as { value: Array<Record<string, unknown>> };
+    const events = applyFilters((res.value ?? []).map(formatEvent));
+    return { calendar: params.calendar ?? "default", start_date: startDate, end_date: lastDay, count: events.length, events };
   }
+
+  // No date bounds: plain event list for text/attendee search.
+  const qs = params.text
+    ? `?$filter=${encodeURIComponent(`contains(subject,'${esc(params.text)}')`)}&$top=50&$orderby=start/dateTime`
+    : `?$top=20&$orderby=start/dateTime`;
+  const res = await graphGet(token, `/me/events${qs}`) as { value: Array<Record<string, unknown>> };
+  const events = applyFilters((res.value ?? []).map(formatEvent));
 
   return { count: events.length, events };
 }

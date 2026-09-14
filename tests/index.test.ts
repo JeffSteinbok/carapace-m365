@@ -489,16 +489,192 @@ describe("outlook_meeting", () => {
   });
 });
 
+describe("all-day and free/busy", () => {
+  function lastBody(spy: ReturnType<typeof mockHttpsSeq>) {
+    const req = spy.mock.results.at(-1)?.value as { write: { mock: { calls: unknown[][] } } };
+    return JSON.parse(String(req.write.mock.calls.at(-1)?.[0]));
+  }
+
+  it("creates an all-day event on midnight boundaries with an exclusive end", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [CALENDARS, 200], [JSON.stringify({ id: "e1", subject: "Move-In" }), 201]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_create_event"].execute("id", {
+      subject: "Move-In", start: "2027-09-19", is_all_day: true, calendar: "family",
+    });
+    const body = lastBody(spy);
+    expect(body.isAllDay).toBe(true);
+    expect(body.start.dateTime).toBe("2027-09-19T00:00:00");
+    // Exclusive end: the midnight after the single day covered.
+    expect(body.end.dateTime).toBe("2027-09-20T00:00:00");
+    // All-day events default to Free, matching Outlook's own behaviour.
+    expect(body.showAs).toBe("free");
+  });
+
+  it("treats all-day end as the last day covered", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [CALENDARS, 200], [JSON.stringify({ id: "e1" }), 201]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_create_event"].execute("id", {
+      subject: "Orientation", start: "2027-09-19", end: "2027-09-21", is_all_day: true,
+    });
+    const body = lastBody(spy);
+    expect(body.start.dateTime).toBe("2027-09-19T00:00:00");
+    expect(body.end.dateTime).toBe("2027-09-22T00:00:00");
+  });
+
+  it("honours an explicit show_as on an all-day event", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [CALENDARS, 200], [JSON.stringify({ id: "e1" }), 201]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_create_event"].execute("id", {
+      subject: "Conference", start: "2027-09-19", is_all_day: true, show_as: "oof",
+    });
+    expect(lastBody(spy).showAs).toBe("oof");
+  });
+
+  it("sets free/busy without cancelling the event", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [JSON.stringify({ id: "e1" }), 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_update_event"].execute("id", { event_id: "e1", show_as: "free" });
+    const body = lastBody(spy);
+    expect(body.showAs).toBe("free");
+    expect(body.isCancelled).toBeUndefined();
+  });
+
+  it("preserves the span when converting a multi-day event to all-day", async () => {
+    // 09-19T00:00 -> 09-23T00:00 covers 19..22 (end midnight is exclusive).
+    const current = JSON.stringify({ start: { dateTime: "2027-09-19T00:00:00" }, end: { dateTime: "2027-09-23T00:00:00" } });
+    const spy = mockHttpsSeq([TOKEN, 200], [current, 200], [JSON.stringify({ id: "e1" }), 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_update_event"].execute("id", { event_id: "e1", is_all_day: true });
+    const req = spy.mock.results.at(-1)?.value as { write: { mock: { calls: unknown[][] } } };
+    const body = JSON.parse(String(req.write.mock.calls.at(-1)?.[0]));
+    expect(body.start.dateTime).toBe("2027-09-19T00:00:00");
+    expect(body.end.dateTime).toBe("2027-09-23T00:00:00");
+  });
+
+  it("reads the current event in the calendar timezone before converting", async () => {
+    // Without Prefer, Graph answers in UTC and the exclusive-end correction
+    // silently shifts multi-day events one day later.
+    const current = JSON.stringify({ start: { dateTime: "2027-09-19T00:00:00" }, end: { dateTime: "2027-09-23T00:00:00" } });
+    const spy = mockHttpsSeq([TOKEN, 200], [current, 200], [JSON.stringify({ id: "e1" }), 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_update_event"].execute("id", { event_id: "e1", is_all_day: true });
+    const readOpts = spy.mock.calls[1]?.[1] as { headers: Record<string, string> };
+    expect(readOpts.headers.Prefer).toBe('outlook.timezone="America/Los_Angeles"');
+  });
+
+  it("converts an existing timed event to all-day using its current date", async () => {
+    const current = JSON.stringify({ start: { dateTime: "2027-09-19T00:00:00" }, end: { dateTime: "2027-09-20T00:00:00" } });
+    const spy = mockHttpsSeq([TOKEN, 200], [current, 200], [JSON.stringify({ id: "e1" }), 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_update_event"].execute("id", { event_id: "e1", is_all_day: true });
+    const body = lastBody(spy);
+    expect(body.isAllDay).toBe(true);
+    expect(body.start.dateTime).toBe("2027-09-19T00:00:00");
+    expect(body.end.dateTime).toBe("2027-09-20T00:00:00");
+    expect(body.showAs).toBe("free");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Calendar: outlook_query_events
 // ---------------------------------------------------------------------------
 
 describe("outlook_query_events", () => {
   it("returns events matching text filter", async () => {
-    mockHttpsSeq([TOKEN, 200], [CALENDARS, 200], [EVENTS, 200], [EVENTS, 200]);
+    // Mock order matters: token, then the /me/events response. (This previously
+    // fed the calendar-folder list in as events, so the text filter "passed"
+    // on two "No subject" entries.)
+    mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_query_events"].execute("id", { text: "Standup" })) as { count: number };
     expect(data.count).toBeGreaterThan(0);
+  });
+
+  it("excludes events that do not match the text filter", async () => {
+    mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", { text: "Nonexistent" })) as { count: number };
+    expect(data.count).toBe(0);
+  });
+
+  // A date range must use calendarView, not /me/events: calendarView expands
+  // recurring series into occurrences and returns events overlapping the
+  // window, so all-day and multi-day events are not dropped.
+  it("queries a date range via calendarView with an inclusive end day", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", {
+      after: "2026-05-01", before: "2026-05-03",
+    })) as { start_date: string; end_date: string; count: number };
+
+    const url = String(spy.mock.calls.at(-1)?.[0]);
+    expect(url).toContain("/me/calendarView");
+    expect(url).not.toContain("/me/events");
+    expect(decodeURIComponent(url)).toContain("startDateTime=2026-05-01T00:00:00");
+    // `before` is inclusive, so the half-open window ends at the next midnight.
+    expect(decodeURIComponent(url)).toContain("endDateTime=2026-05-04T00:00:00");
+    expect(data.start_date).toBe("2026-05-01");
+    expect(data.end_date).toBe("2026-05-03");
+    expect(data.count).toBe(1);
+  });
+
+  it("treats after === before as a single-day query", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_query_events"].execute("id", { after: "2026-05-03", before: "2026-05-03" });
+    const url = decodeURIComponent(String(spy.mock.calls.at(-1)?.[0]));
+    expect(url).toContain("startDateTime=2026-05-03T00:00:00");
+    expect(url).toContain("endDateTime=2026-05-04T00:00:00");
+  });
+
+  it("requests results in the calendar timezone", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_query_events"].execute("id", { after: "2026-05-01" });
+    const opts = spy.mock.calls.at(-1)?.[1] as { headers: Record<string, string> };
+    expect(opts.headers.Prefer).toBe('outlook.timezone="America/Los_Angeles"');
+  });
+
+  it("still uses /me/events when no date bounds are given", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    await api.tools["outlook_query_events"].execute("id", { text: "Standup" });
+    expect(String(spy.mock.calls.at(-1)?.[0])).toContain("/me/events");
+  });
+
+  it("queries a named calendar by resolving its id", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [CALENDARS, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", {
+      calendar: "family", after: "2027-09-01", before: "2027-09-30",
+    })) as { calendar: string; count: number };
+
+    const url = decodeURIComponent(String(spy.mock.calls.at(-1)?.[0]));
+    expect(url).toContain("/me/calendars/fam-1/calendarView");
+    expect(url).toContain("startDateTime=2027-09-01T00:00:00");
+    expect(url).toContain("endDateTime=2027-10-01T00:00:00");
+    expect(data.calendar).toBe("family");
+    expect(data.count).toBe(1);
+  });
+
+  it("reports available calendars when the requested one is missing", async () => {
+    const unknownCals = JSON.stringify({ value: [{ name: "Work", id: "w-1" }] });
+    mockHttpsSeq([TOKEN, 200], [unknownCals, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", {
+      calendar: "family", after: "2027-09-01",
+    })) as { error: string };
+    expect(data.error).toContain("not found");
+    expect(data.error).toContain("work");
+  });
+
+  it("filters a date-range result by attendee", async () => {
+    mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", {
+      after: "2026-05-01", before: "2026-05-03", attendee: "nobody@test.com",
+    })) as { count: number };
+    expect(data.count).toBe(0);
   });
 });
 

@@ -1129,8 +1129,8 @@ export async function markMessage(
     importance?: "normal" | "high" | "low";
   },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
 
@@ -1140,7 +1140,7 @@ export async function markMessage(
   if (params.importance !== undefined) patch.importance = params.importance;
   if (Object.keys(patch).length === 0) return { error: "At least one of read, flag_status, or importance must be provided" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
   const res = await graphPatch(token, `/me/messages/${encodeURIComponent(msgId)}`, patch) as Record<string, unknown>;
   if (res.error) return { error: JSON.stringify(res.error) };
   return { ok: true, ...patch };
@@ -1158,13 +1158,13 @@ export async function labelMessage(
     remove?: string[];
   },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   if (!params.add?.length && !params.remove?.length) return { error: "At least one of add or remove must be provided" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
 
   // Fetch current categories
   const current = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}?$select=categories`) as Record<string, unknown>;
@@ -1190,12 +1190,12 @@ export async function deleteMessage(
   config: OutlookMailConfig,
   params: { message_id: string; permanent?: boolean },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
 
   if (params.permanent) {
     // Hard delete — irrecoverable
@@ -1221,10 +1221,10 @@ export async function listOrCreateFolder(
   config: OutlookMailConfig,
   params: { create_name?: string },
 ): Promise<unknown> {
-  const { clientId, clientSecret, refreshToken } = config;
-  if (!clientId) return { error: "OUTLOOK_CLIENT_ID not set" };
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
 
-  const token = await getAccessToken(clientId, clientSecret, refreshToken);
+  const token = await getGraphAccessToken(config, SCOPES.mailWrite);
 
   if (params.create_name?.trim()) {
     const res = await graphPost(token, "/me/mailFolders", { displayName: params.create_name.trim() }) as Record<string, unknown>;

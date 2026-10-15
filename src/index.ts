@@ -51,6 +51,7 @@ import {
   listOneDrive,
   moveOneDriveItem,
   searchOneDrive,
+  readOneDriveFile,
   uploadOneDriveFile,
 } from "./onedrive.js";
 import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
@@ -82,6 +83,7 @@ const createBaseEntry = definePlugin({
         description: "Microsoft 365 features to register. OneDrive requires explicit enablement.",
       }),
     ),
+    oneDriveDeniedPaths: Type.Optional(Type.Array(Type.String(), { description: "Denied OneDrive paths and descendants. Enables fail-closed reads and disables OneDrive writes." })),
     personalCalendarNames: Type.Optional(
       Type.Array(Type.String(), { description: "Additional personal calendar names to match." }),
     ),
@@ -659,6 +661,7 @@ const createBaseEntry = definePlugin({
       label: "OneDrive List",
       description: "List files and folders in the OneDrive root or a folder addressed by item ID or path.",
       parameters: Type.Object({
+        cursor: Type.Optional(Type.String({ description: "Opaque next_cursor from the previous page. Repeat the same arguments." })),
         item_id: Type.Optional(Type.String({ description: "OneDrive folder item ID. Mutually exclusive with path." })),
         path: Type.Optional(Type.String({ description: "OneDrive folder path relative to the drive root. Omit for root." })),
         limit: Type.Optional(Type.Integer({ description: "Maximum items to return, 1-200 (default 50)." })),
@@ -677,6 +680,7 @@ const createBaseEntry = definePlugin({
       label: "OneDrive Search",
       description: "Search OneDrive files and folders by name or content.",
       parameters: Type.Object({
+        cursor: Type.Optional(Type.String({ description: "Opaque next_cursor from the previous page. Repeat the same arguments." })),
         query: Type.String({ description: "Search text." }),
         limit: Type.Optional(Type.Integer({ description: "Maximum items to return, 1-200 (default 25)." })),
       }),
@@ -703,6 +707,22 @@ const createBaseEntry = definePlugin({
         } catch (e) {
           return { error: (e as Error).message };
         }
+      },
+    }),
+
+    tool({
+      name: "onedrive_read",
+      label: "OneDrive Read",
+      description: "Read bounded UTF-8 text files up to 1 MiB. Office, PDF and binary formats are not supported.",
+      parameters: Type.Object({
+        item_id: Type.Optional(Type.String()),
+        path: Type.Optional(Type.String()),
+        offset: Type.Optional(Type.Integer({ minimum: 0, description: "UTF-16 character offset (default 0)." })),
+        max_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 100000, description: "Maximum characters returned (default 16000)." })),
+      }),
+      async execute(params, config) {
+        try { return await readOneDriveFile(resolveConfig(config), params); }
+        catch (e) { return { error: (e as Error).message }; }
       },
     }),
 
@@ -830,6 +850,7 @@ export const TOOL_REQUIRED_FEATURE = {
   outlook_delete_event: "calendar-write",
   outlook_meeting: "calendar-write",
   outlook_query_events: "calendar-read",
+  onedrive_read: "onedrive-read",
   onedrive_list: "onedrive-read",
   onedrive_search: "onedrive-read",
   onedrive_metadata: "onedrive-read",
@@ -888,6 +909,7 @@ export function resolveConfig(config: {
   tokenBrokerUrl?: string;
   tokenBrokerSecret?: string;
   features?: string[];
+  oneDriveDeniedPaths?: string[];
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
 }): OutlookCalendarConfig {
@@ -912,6 +934,7 @@ export function resolveConfig(config: {
     tokenBrokerUrl: brokerUrl,
     tokenBrokerSecret: brokerSecret,
     features: configuredFeatures(config),
+    oneDriveDeniedPaths: config.oneDriveDeniedPaths,
     personalCalendarNames: parseNames(
       config.personalCalendarNames,
       "M365_PERSONAL_CALENDAR_NAMES",

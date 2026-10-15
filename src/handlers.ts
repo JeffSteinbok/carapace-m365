@@ -27,6 +27,7 @@ export interface OutlookCalendarConfig {
   tokenBrokerSecret: string;
   directTokenStatePath: string;
   features: string[];
+  oneDriveDeniedPaths?: string[];
   personalCalendarNames: string[];
   familyCalendarNames: string[];
 }

@@ -166,7 +166,7 @@ Choose the narrowest delegated permission that supports the desired operation.
 | `calendar-write` | Create, update, delete events or meetings; also enables reads | `Calendars.ReadWrite` |
 | `tasks-read` | Read Microsoft To Do lists/tasks | `Tasks.Read` |
 | `tasks-write` | Create, update, complete, or delete tasks; also enables reads | `Tasks.ReadWrite` |
-| `onedrive-read` | List, search, inspect, or download OneDrive content | `Files.Read` |
+| `onedrive-read` | List, search, inspect, read text, or download OneDrive content | `Files.Read` |
 | `onedrive-write` | Upload, create, move, rename, or delete OneDrive content; also enables reads | `Files.ReadWrite` |
 | Login-only | Receive a reusable refresh token during login | `offline_access` |
 
@@ -242,9 +242,10 @@ both forms reject ambiguous requests containing both.
 
 | Tool | Main parameters | Description |
 |---|---|---|
-| `onedrive_list` | `item_id` or `path`, `limit` | List root or folder children |
-| `onedrive_search` | `query`, `limit` | Search files and folders |
+| `onedrive_list` | `item_id` or `path`, `limit`, `cursor` | List root or folder children |
+| `onedrive_search` | `query`, `limit`, `cursor` | Search files and folders |
 | `onedrive_metadata` | `item_id` or `path` | Get item/root metadata |
+| `onedrive_read` | `item_id` or `path`, `offset`, `max_chars` | Read a bounded window of UTF-8 text (file limit 1 MiB) |
 | `onedrive_download` | `item_id` or `path`, `output_path`, `overwrite` | Download locally; existing files are preserved by default |
 | `onedrive_upload` | `local_path`, `name`, `parent_id` or `parent_path`, `overwrite` | Simple upload up to 4 MiB |
 | `onedrive_create_folder` | `name`, `parent_id` or `parent_path` | Create a folder with conflict behavior `fail` |
@@ -254,6 +255,80 @@ both forms reject ambiguous requests containing both.
 Remote paths reject empty, `.` and `..` segments. Local downloads never
 overwrite unless `overwrite=true`. Uploads also refuse an existing remote name
 unless explicitly allowed.
+
+### Personal OneDrive configuration and exclusions
+
+Use `tenant: "consumers"` (the default) for personal Microsoft accounts. For
+example, the plugin config portion of your OpenClaw configuration can be:
+
+```json
+{
+  "tenant": "consumers",
+  "features": ["onedrive-read"],
+  "oneDriveDeniedPaths": ["Private", "Documents/Financial", "Notes/passwords.txt"]
+}
+```
+
+Paths are relative to your own drive root. Each exclusion blocks the exact file
+or directory and every descendant; it is not a glob or substring match.
+Matching is case-insensitive, NFC-normalized, treats backslashes as separators,
+and conservatively decodes percent escapes (including nested escapes). Unsafe
+or ambiguous paths fail closed. `/` or an empty exclusion blocks the whole drive.
+Omit the property or use `[]` for no exclusions; malformed configuration fails
+closed. Configure this in the plugin, not only in the token broker.
+
+With exclusions active, all read entry points resolve fresh metadata and walk
+parent IDs to the authenticated user's root. Search and list omit denied or
+unverifiable entries, including remote/shared shortcuts; direct access reports
+an error. Missing ancestry, cycles, and ancestry deeper than 128 items are
+refused. Item IDs and misleading search parent paths do not bypass the checks.
+Reads/downloads use the verified item ID and recheck ancestry before releasing
+bytes. All OneDrive write handlers refuse operations while exclusions are
+configured, including when `onedrive-write` is enabled, to prevent move/rename
+routes around the policy. Use `onedrive-read` to keep write tools hidden.
+
+These are **application-level exclusions**, not narrower Microsoft Graph OAuth
+permissions. The OAuth token still has the consented `Files.Read` or
+`Files.ReadWrite` scope; another client or direct Graph access is outside this
+safeguard. Exclusions do not remove previously downloaded files, cached output,
+or other copies. Graph has no atomic path-policy/content transaction: concurrent
+external moves/renames cannot be completely eliminated as a race. Changes to
+exclusions take effect on subsequent calls using the updated plugin config.
+No OAuth grants or deployed configuration are changed by configuring this option.
+
+### Reading and enumerating
+
+`onedrive_read` accepts `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`,
+`.jsonl`, `.xml`, `.yaml`, `.yml`, `.log`, `.html`, `.css`, `.js`, `.ts`, `.py`,
+`.sh`, `.sql`, `.ini`, and `.toml`. It returns raw text, never renders HTML or
+executes code, and rejects invalid UTF-8 and binary control characters. Office,
+PDF, archives, images, UTF-16 files, and other binary formats are not extracted;
+use `onedrive_download` instead (100 MiB maximum). Size is checked before transfer
+and actual response bytes are bounded, even if metadata understates the size.
+No document-parser dependencies are added.
+
+Text output defaults to 16,000 UTF-16 code units, with `max_chars` from 1 to
+100,000. Pass the returned `next_offset` as `offset` to continue; `null` means
+finished. Each call fetches the whole file (up to 1 MiB), so changing files are
+not snapshot-consistent and a window may split a surrogate pair.
+
+List/search return `{ count, items, next_cursor }`. Repeat the same arguments
+(including query, folder and limit) with `cursor: next_cursor` until it is `null`.
+`limit` is a Graph page size from 1 to 200 (default 50 for list, 25 for search).
+Filtering can yield an empty page with a non-null cursor: continue that cursor.
+List enumerates immediate children; call it on returned folders to recurse.
+Search uses Graph's indexed name/content matching, not a complete filesystem scan.
+
+Cursors are authenticated, bound to the request and configuration, expire after
+one hour, and stop working after a plugin process restart or config change.
+Restart enumeration in that case. A cursor is not a raw URL; arbitrary Graph
+routes and cross-host continuations are rejected. Policy checks are repeated on
+every page, at the cost of extra Graph requests and possible throttling for large
+trees. Graph JSON responses are bounded to 4 MiB.
+
+Graph API references: [children and paging](https://learn.microsoft.com/en-us/graph/api/driveitem-list-children?view=graph-rest-1.0),
+[search](https://learn.microsoft.com/en-us/graph/api/driveitem-search?view=graph-rest-1.0),
+and [file content](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0).
 
 ## Token and state behavior
 

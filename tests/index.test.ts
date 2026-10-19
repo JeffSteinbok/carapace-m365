@@ -135,6 +135,7 @@ describe("plugin entry", () => {
       "onedrive_list",
       "onedrive_metadata",
       "onedrive_move",
+      "onedrive_read",
       "onedrive_search",
       "onedrive_upload",
       "outlook_calendar_fetch",
@@ -206,6 +207,7 @@ describe("plugin entry", () => {
       "onedrive_download",
       "onedrive_list",
       "onedrive_metadata",
+      "onedrive_read",
       "onedrive_search",
     ]);
   });
@@ -219,6 +221,7 @@ describe("plugin entry", () => {
       "onedrive_list",
       "onedrive_metadata",
       "onedrive_move",
+      "onedrive_read",
       "onedrive_search",
       "onedrive_upload",
     ]);

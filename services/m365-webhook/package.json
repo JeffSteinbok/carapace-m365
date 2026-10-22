@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsup --config tsup.config.ts && sed -i 's|from \"sqlite\"|from \"node:sqlite\"|g' dist/index.js"
+    "build": "tsup --config tsup.config.ts && perl -pi -e 's|from \"sqlite\"|from \"node:sqlite\"|g' dist/index.js"
   },
   "dependencies": {
     "carapace-mail-runtime": "git+https://github.com/JeffSteinbok/carapace-mail-runtime.git#dbec615af2718adf06e5e06754e50466cfedcc92"

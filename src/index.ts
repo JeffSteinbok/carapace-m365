@@ -3,9 +3,15 @@
  */
 
 import {
+  ACCESS_CONFIG_SCHEMA,
+  checkAccess,
   definePlugin,
+  isAccessControlled,
+  type AccessConfig,
+  type AccessOp,
   type PluginApi,
   type PluginEntry,
+  type ToolCallContext,
 } from "carapace-plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import {
@@ -21,6 +27,7 @@ import {
   deleteEvent,
   createMeeting,
   queryEvents,
+  resolveEventCalendar,
   getInbox,
   searchMail,
   readMessage,
@@ -90,6 +97,13 @@ const createBaseEntry = definePlugin({
     familyCalendarNames: Type.Optional(
       Type.Array(Type.String(), { description: "Additional family calendar names to match." }),
     ),
+    access: Type.Optional(Type.Unsafe<AccessConfig>({
+      ...ACCESS_CONFIG_SCHEMA,
+      description:
+        "Per-calendar read/write access keyed on agent and verified sender. " +
+        'Calendar ids: "personal", "family". Example: { "calendars": { "family": { "read": ["*"], "write": ["*"] } } }. ' +
+        "Omit to allow every caller; once access.calendars is set, unlisted calendars are denied.",
+    })),
   }),
 
   tools: (tool) => [
@@ -483,9 +497,23 @@ const createBaseEntry = definePlugin({
         calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family"), Type.Literal("all")], { description: "Which calendar to fetch: personal, family, or all (default: all)." })),
         days: Type.Optional(Type.Integer({ description: "Number of days ahead to fetch events for (default: 7)." })),
       }),
-      async execute({ calendar, days }, config) {
+      async execute({ calendar, days }, config, ctx) {
         try {
-          return await fetchCalendar(resolveConfig(config), { calendar, days });
+          const requested = calendar ?? "all";
+          if (requested !== "all") {
+            const denied = calendarDenied(config.access, requested, "read", ctx);
+            if (denied) return denied;
+            return await fetchCalendar(resolveConfig(config), { calendar: requested, days });
+          }
+          // "all" returns only the calendars this caller may read.
+          const decisions = ALL_CALENDARS.map((id) => ({ id, d: checkAccess(config.access, CALENDARS, id, "read", ctx) }));
+          const readable = decisions.filter((x) => x.d.allowed).map((x) => x.id);
+          if (readable.length === 0) return { error: decisions.map((x) => !x.d.allowed && x.d.message).filter(Boolean).join("; ") };
+          const result = await fetchCalendar(resolveConfig(config), { calendar: "all", days, calendars: readable });
+          if (readable.length < ALL_CALENDARS.length && result && typeof result === "object" && !("error" in result)) {
+            return { ...(result as Record<string, unknown>), omitted_calendars: ALL_CALENDARS.filter((id) => !readable.includes(id)) };
+          }
+          return result;
         } catch (e) {
           return { error: (e as Error).message };
         }
@@ -509,8 +537,10 @@ const createBaseEntry = definePlugin({
         is_all_day: Type.Optional(Type.Boolean({ description: "Create as an all-day event. `start` and `end` are treated as dates; `end` is the last day covered (inclusive)." })),
         show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
       }),
-      async execute(params, config) {
+      async execute(params, config, ctx) {
         try {
+          const denied = calendarDenied(config.access, params.calendar ?? "personal", "write", ctx);
+          if (denied) return denied;
           return await createEvent(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
@@ -537,8 +567,10 @@ const createBaseEntry = definePlugin({
         is_all_day: Type.Optional(Type.Boolean({ description: "Convert to/from an all-day event. When true, start/end snap to whole days (end inclusive) and free/busy defaults to free." })),
         show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
       }),
-      async execute(params, config) {
+      async execute(params, config, ctx) {
         try {
+          const denied = await eventWriteDenied(config, params.event_id, ctx);
+          if (denied) return denied;
           return await updateEvent(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
@@ -553,8 +585,10 @@ const createBaseEntry = definePlugin({
       parameters: Type.Object({
         event_id: Type.String({ description: "Graph event ID to delete. Get this from outlook_calendar_fetch." }),
       }),
-      async execute(params, config) {
+      async execute(params, config, ctx) {
         try {
+          const denied = await eventWriteDenied(config, params.event_id, ctx);
+          if (denied) return denied;
           return await deleteEvent(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
@@ -578,8 +612,11 @@ const createBaseEntry = definePlugin({
         description: Type.Optional(Type.String({ description: "Meeting description / agenda." })),
         signature: Type.Optional(Type.String({ description: "Signature block for the invite email." })),
       }),
-      async execute(params, config) {
+      async execute(params, config, ctx) {
         try {
+          // Meetings are created on the default (personal) calendar.
+          const denied = calendarDenied(config.access, "personal", "write", ctx);
+          if (denied) return denied;
           return await createMeeting(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
@@ -599,8 +636,12 @@ const createBaseEntry = definePlugin({
         uid: Type.Optional(Type.String({ description: "Return the single event with this exact iCalUId." })),
         calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family")], { description: "Which calendar to query when using a date range (default: the default calendar)." })),
       }),
-      async execute(params, config) {
+      async execute(params, config, ctx) {
         try {
+          // No calendar means the default calendar, which is the personal one.
+          const target = params.calendar ?? "personal";
+          const denied = calendarDenied(config.access, target, "read", ctx);
+          if (denied) return denied;
           return await queryEvents(resolveConfig(config), params);
         } catch (e) {
           return { error: (e as Error).message };
@@ -879,8 +920,8 @@ export function createEntry(): PluginEntry {
       const features = configuredFeatures(api.pluginConfig);
       registerAll({
         ...api,
-        registerTool(tool: unknown) {
-          const name = (tool as { name?: unknown })?.name;
+        registerTool(tool: unknown, opts?: { name?: string }) {
+          const name = opts?.name ?? (tool as { name?: unknown })?.name;
           if (typeof name !== "string" || !(name in TOOL_REQUIRED_FEATURE)) {
             throw new Error(`Microsoft 365 tool is missing a feature policy: ${String(name)}`);
           }
@@ -888,12 +929,52 @@ export function createEntry(): PluginEntry {
             name as keyof typeof TOOL_REQUIRED_FEATURE
           ];
           if (isM365FeatureEnabled(features, required)) {
-            api.registerTool(tool);
+            api.registerTool(tool, opts);
           }
         },
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Calendar access control
+// ---------------------------------------------------------------------------
+
+/** ACL resource kind for calendars (`config.access.calendars`). */
+const CALENDARS = "calendars";
+/** Calendar ids, as used by the tools' `calendar` parameter and the ACL. */
+const ALL_CALENDARS = ["personal", "family"] as const;
+
+/** `{ error }` when `ctx` may not `op` the calendar, else undefined. */
+export function calendarDenied(
+  access: AccessConfig | undefined,
+  calendarId: string,
+  op: AccessOp,
+  ctx: ToolCallContext | undefined,
+): { error: string } | undefined {
+  const decision = checkAccess(access, CALENDARS, calendarId, op, ctx);
+  return decision.allowed ? undefined : { error: decision.message };
+}
+
+/**
+ * Update/delete address events by id only, so find the event's calendar first
+ * and require write on it. Skipped (no extra Graph call) when no calendar ACL
+ * is configured. Events on any other calendar are denied once an ACL is set.
+ */
+async function eventWriteDenied(
+  config: Parameters<typeof resolveConfig>[0] & { access?: AccessConfig },
+  eventId: string,
+  ctx: ToolCallContext | undefined,
+): Promise<{ error: string } | undefined> {
+  if (!isAccessControlled(config.access, CALENDARS)) return undefined;
+  const found = await resolveEventCalendar(resolveConfig(config), eventId);
+  if (found.error) return { error: `Access check failed: could not determine the calendar of event "${eventId}": ${found.error}` };
+  if (!found.key) {
+    const unknownId = `other:${found.name ?? "unknown"}`;
+    return calendarDenied(config.access, unknownId, "write", ctx) ?? undefined;
+  }
+  return calendarDenied(config.access, found.key, "write", ctx);
 }
 
 // ---------------------------------------------------------------------------

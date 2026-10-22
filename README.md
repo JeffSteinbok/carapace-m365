@@ -216,6 +216,59 @@ confidential clients, see
 | `features` | `M365_FEATURES`, then `calendar-write,mail-write,mail-send,tasks-write` | Enabled tool capabilities; use the same list in the broker |
 | `personalCalendarNames` | `M365_PERSONAL_CALENDAR_NAMES` | Extra comma-separated personal calendar names |
 | `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
+| `access` | — | Optional per-calendar read/write access control (see below) |
+
+### Calendar access control
+
+Add an `access` block to restrict which agents and verified senders can read
+or write each calendar. The calendar ids are `personal` (the default calendar)
+and `family`. The rules come from
+[carapace-plugin-sdk](https://github.com/JeffSteinbok/carapace-plugin-sdk#call-context-and-access-control-v31):
+
+- **A grant** is `"*"` or `{ "agent": ..., "sender": ... }`. Every field in a grant must match, and any one matching grant allows the call.
+- **`agent`** is an OpenClaw agent id.
+- **`sender`** names an OpenClaw root-config `accessGroups` entry (`type: "message.senders"`), or the special name `"owner"`.
+- **Turns with no sender** (cron, `openclaw agent`, heartbeat) match only grants with no `sender` field.
+- **No `access` block** allows everything, the same as before.
+- **Default-deny** applies once `access.calendars` exists. An unlisted calendar, or an op with no grant list, is denied.
+
+```json
+{
+  "accessGroups": {
+    "jeff": { "type": "message.senders", "members": { "imessage": ["+14255550100", "jeff@example.com"], "discord": ["123456789012345678"] } }
+  },
+  "plugins": {
+    "entries": {
+      "m365": {
+        "config": {
+          "access": {
+            "calendars": {
+              "family":   { "read": ["*"], "write": ["*"] },
+              "personal": { "read": [{ "agent": "main" }, { "sender": "jeff" }], "write": [{ "agent": "main" }] }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+How each tool is checked:
+
+| Tool | Check |
+|---|---|
+| `outlook_calendar_fetch` | read on `calendar`. With `all` (the default), only readable calendars are returned, and `omitted_calendars` lists the rest. It errors only when none are readable |
+| `outlook_query_events` | read on `calendar` (`personal` when omitted), in every mode: date range, text, `uid`. An explicit `calendar` now scopes `uid` and text queries to that calendar |
+| `outlook_create_event` | write on `calendar` (default `personal`) |
+| `outlook_meeting` | write on `personal` |
+| `outlook_update_event`, `outlook_delete_event` | The event's calendar is looked up first (`GET /me/events/{id}/calendar`), then write is required on it. Events on any other calendar are checked as `other:<name>` and are denied unless granted. The lookup only runs when `access.calendars` is set |
+
+A denial is returned as a tool error, for example
+`Access denied: agent "family" / sender +14255550100 may not read calendar "personal"`.
+It carries no event data and is logged once through the plugin logger. The
+standalone CLI reads config from the environment, so it never has an `access`
+block and is not restricted.
 
 ## Tools
 

@@ -391,7 +391,7 @@ function addMinutes(isoStr: string, minutes: number): string {
 
 export async function fetchCalendar(
   config: OutlookCalendarConfig,
-  params: { calendar?: string; days?: number },
+  params: { calendar?: string; days?: number; calendars?: string[] },
 ): Promise<unknown> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
@@ -403,7 +403,8 @@ export async function fetchCalendar(
   for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
   const start = new Date().toISOString().slice(0, 10);
   const end = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
-  const keys = calendar === "all" ? ["personal", "family"] : [calendar];
+  // `calendars` (set by the access-control layer) narrows "all" to the readable keys.
+  const keys = params.calendars ?? (calendar === "all" ? ["personal", "family"] : [calendar]);
   const results: Record<string, unknown> = {};
   for (const key of keys) {
     const searchNames = calendarSearchNames(config, key);
@@ -632,6 +633,39 @@ export async function updateEvent(
   };
 }
 
+/**
+ * Which logical calendar ("personal" / "family") an event lives on.
+ *
+ * Used by the access-control layer before update/delete, which address events
+ * by id only. Returns `{ key: undefined }` when the event's calendar is neither
+ * the personal nor the family calendar, and `{ error }` when Graph cannot
+ * resolve the event.
+ */
+export async function resolveEventCalendar(
+  config: OutlookCalendarConfig,
+  eventId: string,
+): Promise<{ key?: string; name?: string; error?: string }> {
+  const authError = getAuthConfigError(config);
+  if (authError) return { error: authError };
+  if (!eventId) return { error: "event_id is required" };
+  // Same scope as the write that follows, so no extra consent is needed.
+  const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
+  const cal = await graphGet(token, `/me/events/${eventId}/calendar?$select=id,name`) as {
+    id?: string; name?: string; error?: { message?: string };
+  };
+  if (!cal?.id) return { error: cal?.error?.message ?? "event or its calendar was not found" };
+  const calData = await graphGet(token, "/me/calendars?$select=id,name&$top=50") as { value?: Array<{ name: string; id: string }> };
+  const calMap: Record<string, string> = {};
+  for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
+  const name = cal.name?.toLowerCase() ?? "";
+  for (const key of Object.keys(CALENDAR_DEFAULTS)) {
+    const names = calendarSearchNames(config, key);
+    const resolvedId = names.map(n => calMap[n]).find(Boolean);
+    if (resolvedId ? resolvedId === cal.id : names.includes(name)) return { key, name: cal.name };
+  }
+  return { key: undefined, name: cal.name };
+}
+
 export interface DeleteEventParams {
   event_id: string;
 }
@@ -763,8 +797,22 @@ export async function queryEvents(
 
   const esc = (s: string) => s.replace(/'/g, "''");
 
+  // An explicit calendar scopes every query mode (uid, date range, text) to that
+  // calendar; without one, queries hit the default calendar (/me/events).
+  let calendarBase = "/me";
+  if (params.calendar && params.calendar !== "default") {
+    const calData = await graphGet(token, "/me/calendars?$select=id,name&$top=50") as { value: Array<{ name: string; id: string }> };
+    const calMap: Record<string, string> = {};
+    for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
+    const calId = calendarSearchNames(config, params.calendar).map(n => calMap[n]).find(Boolean);
+    if (!calId) {
+      return { error: `Calendar "${params.calendar}" not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] };
+    }
+    calendarBase = `/me/calendars/${calId}`;
+  }
+
   if (params.uid) {
-    const res = await graphGet(token, `/me/events?$filter=iCalUId eq '${esc(params.uid)}'`) as { value: Array<Record<string, unknown>> };
+    const res = await graphGet(token, `${calendarBase}/events?$filter=iCalUId eq '${esc(params.uid)}'`) as { value: Array<Record<string, unknown>> };
     return { events: (res.value ?? []).map(formatEvent) };
   }
 
@@ -805,17 +853,7 @@ export async function queryEvents(
 
     // Without an explicit calendar this queries the default calendar only.
     // "personal"/"family" resolve by name the same way outlook_calendar_fetch does.
-    let viewPath = `/me/calendarView?${qp}`;
-    if (params.calendar && params.calendar !== "default") {
-      const calData = await graphGet(token, "/me/calendars?$select=id,name&$top=50") as { value: Array<{ name: string; id: string }> };
-      const calMap: Record<string, string> = {};
-      for (const c of calData.value ?? []) calMap[c.name.toLowerCase()] = c.id;
-      const calId = calendarSearchNames(config, params.calendar).map(n => calMap[n]).find(Boolean);
-      if (!calId) {
-        return { error: `Calendar "${params.calendar}" not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] };
-      }
-      viewPath = `/me/calendars/${calId}/calendarView?${qp}`;
-    }
+    const viewPath = `${calendarBase}/calendarView?${qp}`;
 
     const res = await graphGet(
       token,
@@ -830,7 +868,7 @@ export async function queryEvents(
   const qs = params.text
     ? `?$filter=${encodeURIComponent(`contains(subject,'${esc(params.text)}')`)}&$top=50&$orderby=start/dateTime`
     : `?$top=20&$orderby=start/dateTime`;
-  const res = await graphGet(token, `/me/events${qs}`) as { value: Array<Record<string, unknown>> };
+  const res = await graphGet(token, `${calendarBase}/events${qs}`) as { value: Array<Record<string, unknown>> };
   const events = applyFilters((res.value ?? []).map(formatEvent));
 
   return { count: events.length, events };

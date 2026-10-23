@@ -127,17 +127,20 @@ The root plugin should call `http://127.0.0.1:18790/token` directly.
 Old executable:
 
 ```text
-/home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
+~/git/openclaw-hub/services/outlook-webhook/dist/index.js
 ```
 
 New executable:
 
 ```text
-/home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
+~/git/carapace-m365/services/m365-webhook/dist/index.js
 ```
 
 No change to `openclaw-hub` is required in this repository task. Update the
-deployed systemd unit separately after this repository is installed and built.
+deployed service (systemd unit on Linux, LaunchAgent on macOS) separately after
+this repository is installed and built.
+
+### Linux (systemd --user)
 
 Example user unit:
 
@@ -147,7 +150,7 @@ Description=OpenClaw Microsoft 365 Webhook and Token Broker
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node /home/openclaw/git/carapace-m365/services/m365-webhook/dist/index.js
+ExecStart=/usr/bin/node %h/git/carapace-m365/services/m365-webhook/dist/index.js
 Restart=on-failure
 RestartSec=10
 EnvironmentFile=%h/.openclaw/.env
@@ -162,6 +165,21 @@ Then, outside this repository change:
 systemctl --user daemon-reload
 systemctl --user enable --now m365-webhook
 systemctl --user status m365-webhook
+```
+
+### macOS (launchd)
+
+Use a LaunchAgent in `~/Library/LaunchAgents/` (for example
+`com.openclaw.m365-webhook.plist`) whose `ProgramArguments` are
+`node --env-file=$HOME/.openclaw/.env $HOME/git/carapace-m365/services/m365-webhook/dist/index.js`
+written out as absolute paths, with `RunAtLoad` and `KeepAlive` set and
+`StandardOutPath`/`StandardErrorPath` pointing at a log file such as
+`~/Library/Logs/openclaw-m365-webhook.log`. Then:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.m365-webhook.plist
+launchctl kickstart -k gui/$(id -u)/com.openclaw.m365-webhook   # restart
+launchctl print gui/$(id -u)/com.openclaw.m365-webhook          # status
 ```
 
 Do not run multiple services with the same refresh token; competing rotation can

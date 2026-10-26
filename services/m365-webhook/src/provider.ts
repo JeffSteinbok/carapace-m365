@@ -44,8 +44,9 @@ export class OutlookProviderClient implements MailProviderClient {
     };
   }
 
+  // Graph's hasAttachments is false when a message only has inline
+  // attachments (e.g. USPS digest scans), so it can't gate these lookups.
   async listAttachments(envelope: MailEnvelope): Promise<AttachmentMeta[]> {
-    if (!envelope.has_attachments) return [];
     const attachments = await this.graph.fetchAttachments(envelope.message_id);
     return attachments.map((attachment) => ({
       name: attachment.name ?? "attachment",
@@ -76,8 +77,6 @@ export class OutlookProviderClient implements MailProviderClient {
         saved.push("body.html");
       }
     }
-    if (!envelope.has_attachments) return saved;
-
     const attachments = await this.graph.fetchAttachments(envelope.message_id);
     for (const attachment of attachments) {
       if (!attachment.contentBytes) continue;

@@ -55,6 +55,36 @@ plugin. Supported values are `mail-read`, `mail-write`, `mail-send`,
 feature. `mail-send` is independent. OneDrive scopes are denied unless
 explicitly enabled.
 
+## Trusted forwarders
+
+If another mail service forwards into this mailbox, Exchange often reports
+`dmarc=fail` for unsigned mail. The forwarder rewrites the envelope sender
+(SRS), so SPF no longer lines up with the From domain. The forwarder usually
+checked the mail itself first, and Exchange keeps that verdict as
+`Authentication-Results-Original`.
+
+List the forwarder in the runtime config to use its verdict for `dkim_pass` and
+`dmarc_pass` rule conditions:
+
+```json
+{
+  "trusted_forwarders": [
+    { "srs_domain": "srs.forwarder.example", "authserv_id": "forwarder.example" }
+  ],
+  "mail_rules": []
+}
+```
+
+- `srs_domain`: the envelope sender domain the forwarder uses when relaying.
+- `authserv_id`: the domain in the forwarder's own `Authentication-Results`
+  headers. Subdomains such as `mx1.forwarder.example` match.
+
+The forwarder's verdict is used only when Exchange's SPF check passed for
+`srs_domain`, so a message sent directly to this mailbox can't claim it. Only the
+forwarder's own leading headers count; copies written by the sender further down
+are ignored. Without a matching forwarder, Exchange's verdict is used. Changes
+are picked up on config reload.
+
 ## Token endpoint
 
 The plugin calls:

@@ -18,6 +18,8 @@ import {
 import {
   buildPipelineRules,
   loadRuntimeConfig,
+  buildTrustedForwarders,
+  type TrustedForwarder,
   loadServiceConfig,
   log,
   RENEWAL_CHECK_INTERVAL_MS,
@@ -130,6 +132,7 @@ export function createServiceServer(options: {
   graph?: GraphClient;
   clientState?: string;
   getPipelineRules?: () => ReturnType<typeof buildPipelineRules>;
+  getTrustedForwarders?: () => TrustedForwarder[];
   registry?: ActionRegistry;
   runtimeConfig?: Record<string, unknown>;
   notifyChannel?: string;
@@ -185,6 +188,7 @@ export function createServiceServer(options: {
         pipelineWorkspace: options.pipelineWorkspace,
         notificationStore: options.notificationStore,
         mailStore: options.mailStore,
+        trustedForwarders: options.getTrustedForwarders?.() ?? [],
       });
     } catch (error) {
       log(`error handling webhook request: ${error}`);
@@ -289,6 +293,7 @@ export async function main(): Promise<void> {
   const graph = new GraphClient(tokens);
   const runtimeConfig = loadRuntimeConfig(config.runtimeConfigPath);
   const pipelineRules = buildPipelineRules(runtimeConfig);
+  const trustedForwarders = buildTrustedForwarders(runtimeConfig);
   const registry = new ActionRegistry();
   registerBuiltinActions(registry, { mailboxPrefixResolver: () => "📬" });
 
@@ -312,9 +317,14 @@ export async function main(): Promise<void> {
     watcher = watch(config.runtimeConfigPath, () => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        const updated = buildPipelineRules(loadRuntimeConfig(config.runtimeConfigPath));
+        const reloaded = loadRuntimeConfig(config.runtimeConfigPath);
+        const updated = buildPipelineRules(reloaded);
         pipelineRules.splice(0, pipelineRules.length, ...updated);
-        log(`runtime config reloaded: ${updated.length} mail rule(s)`);
+        trustedForwarders.splice(0, trustedForwarders.length, ...buildTrustedForwarders(reloaded));
+        log(
+          `runtime config reloaded: ${updated.length} mail rule(s), `
+            + `${trustedForwarders.length} trusted forwarder(s)`,
+        );
       }, 500);
     });
   } catch {
@@ -332,6 +342,7 @@ export async function main(): Promise<void> {
     graph,
     clientState: config.webhookClientState,
     getPipelineRules: () => pipelineRules,
+    getTrustedForwarders: () => trustedForwarders,
     registry,
     runtimeConfig,
     notifyChannel: config.notifyChannel,

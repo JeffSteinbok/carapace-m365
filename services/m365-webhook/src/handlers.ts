@@ -4,7 +4,7 @@ import {
   executeRules,
   type MailEnvelope,
 } from "carapace-mail-runtime";
-import { log, type MailRule } from "./config.js";
+import { log, type MailRule, type TrustedForwarder } from "./config.js";
 import { dispatchResults } from "./dispatch.js";
 import { GraphClient, type GraphMessage } from "./graph.js";
 import { MailStore } from "@carapace/m365-mail-store";
@@ -20,29 +20,88 @@ interface GraphNotificationBody {
   value?: GraphNotificationValue[];
 }
 
-export function messageToEnvelope(message: GraphMessage): MailEnvelope {
+function extractAuthResult(header: string, protocol: string): string | undefined {
+  const match = header.match(
+    new RegExp(`(?:^|[;\\n])\\s*${protocol}=([a-zA-Z0-9-]+)`, "i"),
+  );
+  return match?.[1]?.toLowerCase();
+}
+
+function authservId(header: string): string {
+  return header.split(";", 1)[0].trim().split(/\s+/)[0] ?? "";
+}
+
+function isDomainOrSubdomain(host: string, domain: string): boolean {
+  const low = host.toLowerCase();
+  return low === domain || low.endsWith(`.${domain}`);
+}
+
+/**
+ * The verdict a trusted forwarder recorded before relaying mail here.
+ *
+ * Forwarding with an SRS envelope sender breaks DMARC alignment at Exchange
+ * for unsigned mail, but the forwarder's own verdict survives as
+ * Authentication-Results-Original. A sender could also write such a header, so
+ * it is trusted only when Exchange's SPF check proves the message arrived from
+ * the forwarder's SRS domain. Forwarders prepend their headers, so only the
+ * leading run stamped by that forwarder counts, and the first one carrying a
+ * DMARC result is its own.
+ */
+function forwardedAuth(
+  exchangeResults: string | undefined,
+  originals: string[],
+  forwarders: TrustedForwarder[],
+): MailEnvelope["auth_results"] {
+  if (!exchangeResults || !forwarders.length) return undefined;
+  if (extractAuthResult(exchangeResults, "spf") !== "pass") return undefined;
+  const mailFrom = exchangeResults.match(/\bsmtp\.mailfrom=([^\s;]+)/i)?.[1] ?? "";
+  const mailFromDomain = mailFrom.split("@").pop()!.toLowerCase();
+  const forwarder = forwarders.find((f) => f.srs_domain === mailFromDomain);
+  if (!forwarder) return undefined;
+
+  for (const original of originals) {
+    if (!isDomainOrSubdomain(authservId(original), forwarder.authserv_id)) break;
+    const dmarc = extractAuthResult(original, "dmarc");
+    if (!dmarc) continue;
+    return {
+      dkim: extractAuthResult(original, "dkim"),
+      spf: extractAuthResult(original, "spf"),
+      dmarc,
+      raw: original,
+    };
+  }
+  return undefined;
+}
+
+export function messageToEnvelope(
+  message: GraphMessage,
+  trustedForwarders: TrustedForwarder[] = [],
+): MailEnvelope {
   const from = message.from?.emailAddress;
   const headers: Record<string, string> = {};
   let authenticationResults: string | undefined;
+  const originalResults: string[] = [];
   for (const header of message.internetMessageHeaders ?? []) {
     const key = header.name.toLowerCase();
-    if (key === "authentication-results") authenticationResults = header.value;
-    if (key === "authentication-results" || key === "to" || key === "cc") {
+    // Exchange renames inbound copies to Authentication-Results-Original, so
+    // this is its own verdict; take the first in case more than one appears.
+    if (key === "authentication-results" && authenticationResults === undefined) {
+      authenticationResults = header.value;
+      headers[key] = header.value;
+    }
+    if (key === "authentication-results-original") {
+      originalResults.push(header.value);
+    }
+    if (key === "to" || key === "cc") {
       headers[key] = header.value;
     }
   }
 
-  let authResults: MailEnvelope["auth_results"];
-  if (authenticationResults) {
-    const extract = (protocol: string): string | undefined => {
-      const match = authenticationResults?.match(
-        new RegExp(`(?:^|[;\\n])\\s*${protocol}=([a-zA-Z0-9-]+)`, "i"),
-      );
-      return match?.[1]?.toLowerCase();
-    };
-    const dkim = extract("dkim");
-    const spf = extract("spf");
-    const dmarc = extract("dmarc");
+  let authResults = forwardedAuth(authenticationResults, originalResults, trustedForwarders);
+  if (!authResults && authenticationResults) {
+    const dkim = extractAuthResult(authenticationResults, "dkim");
+    const spf = extractAuthResult(authenticationResults, "spf");
+    const dmarc = extractAuthResult(authenticationResults, "dmarc");
     if (dkim || spf || dmarc) {
       authResults = { dkim, spf, dmarc, raw: authenticationResults };
     }
@@ -95,6 +154,7 @@ export async function handleNotification(
     pipelineWorkspace: string;
     notificationStore?: StateStore;
     mailStore?: MailStore;
+    trustedForwarders?: TrustedForwarder[];
   },
 ): Promise<void> {
   let parsed: GraphNotificationBody;
@@ -127,7 +187,7 @@ export async function handleNotification(
     }
     try {
       const message = await options.graph.fetchMessage(messageId);
-      const envelope = messageToEnvelope(message);
+      const envelope = messageToEnvelope(message, options.trustedForwarders);
       log(`received: "${envelope.subject}" from ${envelope.sender_email}`);
 
       if (options.mailStore?.enabled) {

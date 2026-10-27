@@ -14,7 +14,20 @@ export const RENEWAL_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 export interface RuntimeConfig {
   mail_rules?: MailRule[];
   action_plugins?: string[];
+  trusted_forwarders?: TrustedForwarder[];
   [key: string]: unknown;
+}
+
+/**
+ * A server that forwards mail into this mailbox and records its own
+ * authentication verdict before doing so. See forwardedAuth in handlers.ts
+ * for how the verdict is used.
+ */
+export interface TrustedForwarder {
+  /** Envelope sender domain the forwarder rewrites to (SRS), e.g. "srs.example.net". */
+  srs_domain: string;
+  /** Domain of the authserv-id the forwarder stamps, e.g. "example.net" for "mx1.example.net". */
+  authserv_id: string;
 }
 
 export interface MailRule {
@@ -139,4 +152,18 @@ export function loadRuntimeConfig(path: string): RuntimeConfig {
 
 export function buildPipelineRules(config: RuntimeConfig): MailRule[] {
   return [...(config.mail_rules ?? [])];
+}
+
+export function buildTrustedForwarders(config: RuntimeConfig): TrustedForwarder[] {
+  const forwarders: TrustedForwarder[] = [];
+  for (const entry of config.trusted_forwarders ?? []) {
+    const srs = typeof entry?.srs_domain === "string" ? entry.srs_domain.trim().toLowerCase() : "";
+    const authserv = typeof entry?.authserv_id === "string" ? entry.authserv_id.trim().toLowerCase() : "";
+    if (!srs || !authserv) {
+      log(`ignoring trusted_forwarders entry without srs_domain and authserv_id: ${JSON.stringify(entry)}`);
+      continue;
+    }
+    forwarders.push({ srs_domain: srs, authserv_id: authserv });
+  }
+  return forwarders;
 }

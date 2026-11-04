@@ -7,7 +7,7 @@ import {
   DEFAULT_M365_FEATURES,
   M365_FEATURE_POLICY,
   M365_FEATURES,
-  deriveFeatureGraphScopes,
+  deriveAllowedGraphScopes,
   inferM365FeaturesFromScopes,
   normalizeGraphScopeNames,
   parseM365Features,
@@ -89,12 +89,21 @@ try {
   process.exit(1);
 }
 
-const delegatedScopes = explicitScopes
+// Consent to every scope the broker may request for these features, including
+// the read scopes that write features imply: read tools ask for Mail.Read or
+// Calendars.Read, and Microsoft refuses a scope that wasn't consented by name
+// even when its ReadWrite scope was (AADSTS70000, "scopes requested are
+// unauthorized").
+const explicitList = explicitScopes
   ? normalizeGraphScopeNames(explicitScopes.split(/[\s,]+/))
-  : deriveFeatureGraphScopes(requestedFeatures);
+  : [];
 const inferred = explicitScopes
-  ? inferM365FeaturesFromScopes(delegatedScopes)
+  ? inferM365FeaturesFromScopes(explicitList)
   : { features: requestedFeatures, unknownScopes: [] };
+const delegatedScopes = normalizeGraphScopeNames([
+  ...explicitList,
+  ...deriveAllowedGraphScopes(inferred.features),
+]);
 const scopes = normalizeGraphScopeNames([
   ...delegatedScopes,
   "offline_access",

@@ -65,7 +65,10 @@ npm run login -- --scopes "Mail.Read Files.Read"
 Run `npm run login -- --list-features` for every feature name. The login command
 adds `offline_access` and `openid` because interactive authorization needs them
 to issue a refresh token; Graph access-token requests use only the scopes needed
-for each operation. After consent it prints `M365_FEATURES` and a matching
+for each operation. It also consents to the read scopes a write feature implies
+(`mail-write` asks for `Mail.Read` as well as `Mail.ReadWrite`), because read
+tools request the narrower scope and Microsoft refuses a scope that wasn't
+consented by name (`AADSTS70000`). After consent it prints `M365_FEATURES` and a matching
 plugin `features` snippet; use that same normalized list in both places.
 
 ### 2. Run the token broker/webhook service

@@ -45,6 +45,11 @@ node services/m365-webhook/dist/index.js
 | `NOTIFY_TARGET` | none | Required OpenClaw notification target |
 | `NOTIFY_CHANNEL` | `discord` | OpenClaw notification channel |
 
+Notifications and agent replies both go to `NOTIFY_CHANNEL`/`NOTIFY_TARGET`. A
+rule action that hands an email to an agent (`prompt_email`) runs
+`openclaw agent --deliver` with `--reply-channel` and `--reply-to` set to these,
+so it works for a dedicated agent with no channel bindings of its own.
+
 Use long independently generated values for `M365_TOKEN_BROKER_SECRET` and
 `M365_WEBHOOK_CLIENT_STATE`. Neither is logged.
 

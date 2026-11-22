@@ -22,10 +22,19 @@ export function deliver(message: string, channel: string, target: string): void 
   );
 }
 
+/**
+ * Hand an email to an agent and deliver its reply.
+ *
+ * `reply` names where the reply goes. Without it, OpenClaw delivers to the
+ * session's own route, which only exists for agents bound to a channel (such
+ * as the default agent); a dedicated agent with no bindings fails with
+ * "Channel is required when multiple channels are configured".
+ */
 export function handoffToAgent(
   agent: string,
   message: string,
   sessionKey?: string,
+  reply?: { channel: string; target: string },
 ): void {
   execFile(
     "openclaw",
@@ -38,6 +47,7 @@ export function handoffToAgent(
       "--timeout",
       "120",
       ...(sessionKey ? ["--session-key", sessionKey] : []),
+      ...(reply ? ["--reply-channel", reply.channel, "--reply-to", reply.target] : []),
       "--message",
       message,
     ],
@@ -70,6 +80,7 @@ export function dispatchResults(
         (payload.agent as string) ?? "main",
         payload.message as string,
         payload.session as string | undefined,
+        { channel: config.channel, target: config.target },
       ),
     },
   });

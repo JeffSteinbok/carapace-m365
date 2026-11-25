@@ -496,9 +496,11 @@ const createBaseEntry = definePlugin({
       parameters: Type.Object({
         calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family"), Type.Literal("all")], { description: "Which calendar to fetch: personal, family, or all (default: all)." })),
         days: Type.Optional(Type.Integer({ description: "Number of days ahead to fetch events for (default: 7)." })),
+        days_ahead: Type.Optional(Type.Integer({ description: "Alias for days." })),
       }),
-      async execute({ calendar, days }, config, ctx) {
+      async execute({ calendar, days, days_ahead }, config, ctx) {
         try {
+          days ??= days_ahead;
           const requested = calendar ?? "all";
           if (requested !== "all") {
             const denied = calendarDenied(config.access, requested, "read", ctx);

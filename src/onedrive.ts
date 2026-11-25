@@ -9,7 +9,7 @@ import {
 } from "./handlers.js";
 import { isM365FeatureEnabled } from "@carapace/m365-graph-auth";
 
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+import { continuationPath, GRAPH_BASE } from "./graph-url.js";
 export const ONEDRIVE_SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024;
 export const ONEDRIVE_DOWNLOAD_LIMIT = 100 * 1024 * 1024;
 const FILES_READ = ["Files.Read"] as const;
@@ -340,18 +340,9 @@ function decodeCursor(cursor: string, scope: string): string {
   if (data.expires < Date.now()) throw new Error("Expired OneDrive cursor");
   return data.next;
 }
-function continuationPath(next: string, initial: string): string {
-  const url = new URL(next);
-  const base = new URL(`${GRAPH_BASE}${initial}`);
-  if (url.origin !== base.origin || url.pathname !== base.pathname || url.username || url.password || url.hash) {
-    throw new Error("Unsafe OneDrive continuation URL");
-  }
-  return url.pathname.slice("/v1.0".length) + url.search;
-}
-
 async function page(config: OutlookConfig, token: string, initial: string, cursor?: string): Promise<unknown> {
   const scope = JSON.stringify([config, initial]);
-  const path = cursor ? continuationPath(decodeCursor(cursor, scope), initial) : initial;
+  const path = cursor ? continuationPath(decodeCursor(cursor, scope), initial, "Unsafe OneDrive continuation URL") : initial;
   const data = await graphJson<{ value?: DriveItem[]; "@odata.nextLink"?: string }>("GET", path, token);
   const items: Record<string, unknown>[] = [];
   const protectedMode = deniedPaths(config).length > 0;
@@ -364,7 +355,7 @@ async function page(config: OutlookConfig, token: string, initial: string, curso
     } catch { /* Excluded or unverifiable entries never escape in results. */ }
   }
   const next = data["@odata.nextLink"];
-  if (next) continuationPath(next, initial);
+  if (next) continuationPath(next, initial, "Unsafe OneDrive continuation URL");
   return { count: items.length, items, next_cursor: next ? encodeCursor(next, scope) : null };
 }
 

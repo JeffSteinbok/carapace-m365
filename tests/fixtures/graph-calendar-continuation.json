@@ -1,0 +1,4 @@
+{
+  "calendarId": "AAAbAAAbAAAbAAAbAAAbAb1bAAAbAAAbAb1bAAbAAbAAA1bA1bb1bbAAbbbAAbA1AAAAAA11b11AbAbAbAbb1bAAbbAAAAAAAbAAAA11b11AbAbAbAbb1bAAbbAAA_AAbbAAAAA=",
+  "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendars('AAAbAAAbAAAbAAAbAAAbAb1bAAAbAAAbAb1bAAbAAbAAA1bA1bb1bbAAbbbAAbA1AAAAAA11b11AbAbAbAbb1bAAbbAAAAAAAbAAAA11b11AbAbAbAbb1bAAbbAAA_AAbbAAAAA=')/calendarView?%24select=id%2csubject%2cstart%2cend%2clocation%2corganizer%2cattendees%2cresponseStatus%2cshowAs%2cisAllDay%2cbody&%24orderby=start%2fdateTime&startDateTime=2026-01-01T00%3a00%3a00-08%3a00&endDateTime=2027-03-01T00%3a00%3a00-08%3a00&%24top=200&%24skip=200"
+}

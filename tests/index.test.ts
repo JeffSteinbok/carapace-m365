@@ -683,24 +683,40 @@ describe("outlook_query_events", () => {
     expect(data.count).toBe(1);
   });
 
-  it("reads every page of a February family query with Pacific midnight boundaries", async () => {
-    const next = "https://graph.microsoft.com/v1.0/me/calendars/fam-1/calendarView?$skiptoken=page%2Btwo";
+  it("follows the OData key path Graph returns for a wide family query", async () => {
+    const fixture = JSON.parse(readFileSync(new URL("./fixtures/graph-calendar-continuation.json", import.meta.url), "utf8"));
+    const next = fixture["@odata.nextLink"];
+    const calendars = JSON.stringify({ value: [{ name: "Your Family", id: fixture.calendarId }] });
     const spy = mockHttpsSeq(
-      [TOKEN, 200], [CALENDARS, 200],
+      [TOKEN, 200], [calendars, 200],
       [JSON.stringify({ value: [], "@odata.nextLink": next }), 200], [EVENTS, 200],
     );
     const { api } = await loadPlugin();
     const data = resultText(await api.tools["outlook_query_events"].execute("id", {
-      calendar: "family", after: "2027-02-01", before: "2027-02-28",
+      calendar: "family", after: "2026-01-01", before: "2027-02-28",
     })) as { count: number };
     const first = decodeURIComponent(String(spy.mock.calls.at(-2)?.[0]));
-    expect(first).toContain("startDateTime=2027-02-01T00:00:00-08:00");
+    expect(first).toContain("startDateTime=2026-01-01T00:00:00-08:00");
     expect(first).toContain("endDateTime=2027-03-01T00:00:00-08:00");
     expect(spy.mock.calls.at(-1)?.[0]).toBe(next);
     expect(spy.mock.calls.at(-1)?.[1]).toMatchObject({
       headers: { Prefer: 'outlook.timezone="America/Los_Angeles"' },
     });
     expect(data.count).toBe(1);
+  });
+
+  it("rejects a continuation for a calendar whose ID differs only in case", async () => {
+    const calendars = JSON.stringify({ value: [{ name: "Your Family", id: "ABCd" }] });
+    const next = "https://graph.microsoft.com/v1.0/me/calendars('ABCD')/calendarView?$skiptoken=next";
+    const spy = mockHttpsSeq(
+      [TOKEN, 200], [calendars, 200], [JSON.stringify({ value: [], "@odata.nextLink": next }), 200],
+    );
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", {
+      calendar: "family", after: "2026-01-01", before: "2027-02-28",
+    }));
+    expect(result.error).toContain("invalid calendar continuation link");
+    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   it.each([

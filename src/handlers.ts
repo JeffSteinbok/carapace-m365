@@ -13,7 +13,7 @@ import {
   type GraphTokenManagerOptions,
 } from "@carapace/m365-graph-auth";
 import { DirectTokenStateStore } from "./direct-token-state.js";
-import { continuationPath, GRAPH_BASE } from "./graph-url.js";
+import { calendarContinuationPath, GRAPH_BASE } from "./graph-url.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -241,7 +241,7 @@ async function readCalendarView(
     if (next === undefined) return events;
     const linkError = "Microsoft Graph returned an invalid calendar continuation link";
     if (typeof next !== "string") throw new Error(linkError);
-    pagePath = continuationPath(next, path, linkError);
+    pagePath = calendarContinuationPath(next, path, linkError);
   }
   throw new Error(`Microsoft Graph calendar query exceeded the ${CALENDAR_PAGE_LIMIT}-page limit`);
 }

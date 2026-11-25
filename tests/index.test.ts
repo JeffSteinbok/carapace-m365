@@ -705,6 +705,20 @@ describe("outlook_query_events", () => {
     expect(data.count).toBe(1);
   });
 
+  it("rejects a continuation for a calendar whose ID differs only in case", async () => {
+    const calendars = JSON.stringify({ value: [{ name: "Your Family", id: "ABCd" }] });
+    const next = "https://graph.microsoft.com/v1.0/me/calendars('ABCD')/calendarView?$skiptoken=next";
+    const spy = mockHttpsSeq(
+      [TOKEN, 200], [calendars, 200], [JSON.stringify({ value: [], "@odata.nextLink": next }), 200],
+    );
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", {
+      calendar: "family", after: "2026-01-01", before: "2027-02-28",
+    }));
+    expect(result.error).toContain("invalid calendar continuation link");
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
   it.each([
     "https://example.invalid/v1.0/me/calendarView?$skiptoken=next",
     "https://graph.microsoft.com/v1.0/me/events?$skiptoken=next",

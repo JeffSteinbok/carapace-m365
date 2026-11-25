@@ -22,11 +22,12 @@ export function continuationPath(next: string, initial: string, errorMessage: st
 function normalizeCalendarView(pathname: string): string[] {
   // Decode individual segments so an escaped slash in a calendar ID remains
   // part of that ID. Graph also represents the same ID as an OData string key.
-  const segments = pathname.split("/").map(segment => decodeURIComponent(segment).toLowerCase());
+  const segments = pathname.split("/").map(segment => decodeURIComponent(segment));
   const key = /^calendars\('((?:[^']|'')+)'\)$/.exec(segments[3] ?? "");
   if (segments.length === 5 && key) {
     segments.splice(3, 1, "calendars", key[1].replace(/''/g, "'"));
   }
+  segments[1] = (segments[1] ?? "").toLowerCase();
   return segments;
 }
 

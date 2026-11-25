@@ -289,8 +289,10 @@ For personal or family conflict checks, call `outlook_query_events` with the cal
 inclusive `after` and `before` dates. The date range uses Pacific midnight boundaries
 and includes recurring occurrences. Calendar reads follow up to 50 Microsoft Graph
 calendar view pages and report an error if more pages are needed. Each Graph
-`nextLink` must match the original request's origin and pathname exactly, including
-the calendar ID's URL encoding.
+`nextLink` must use the original Graph origin and identify the same calendar view.
+The host and API version are case-insensitive. Other path segments, including
+the calendar ID, are compared case-sensitively after URL decoding. Graph's
+OData string-key form and the corresponding slash-separated path are equivalent.
 `outlook_calendar_fetch` reads a rolling window from today and accepts `days_ahead`
 as an alias for `days`.
 

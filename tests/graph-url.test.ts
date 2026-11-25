@@ -5,14 +5,16 @@ describe("calendar continuation paths", () => {
   const initial = "/me/calendars/Ab%2Fc%3D/calendarView";
   const error = "invalid continuation";
 
-  it("compares decoded, case-normalized paths and preserves the wire encoding", () => {
-    const next = "/ME/Calendars(%27aB%2fc=%27)/CALENDARVIEW?%24skip=200";
-    expect(calendarContinuationPath(`https://graph.microsoft.com/V1.0${next}`, initial, error)).toBe(next);
+  it("compares decoded paths with case-insensitive host and version and preserves the wire encoding", () => {
+    const next = "/me/calendars(%27Ab%2fc=%27)/calendarView?%24skip=200";
+    expect(calendarContinuationPath(`https://GRAPH.MICROSOFT.COM/V1.0${next}`, initial, error)).toBe(next);
   });
 
   it.each([
     "/beta/me/calendars('Ab%2Fc=')/calendarView",
     "/v1.0/me/calendars('different=')/calendarView",
+    "/v1.0/ME/calendars('Ab%2Fc=')/calendarView",
+    "/v1.0/me/calendars('Ab%2Fc=')/calendarview",
     "/v1.0/me/calendars('Ab%2Fc=')/events",
     "/v1.0/me/calendars/Ab/c=/calendarView",
     "/v1.0/me/calendars('Ab%ZZc=')/calendarView",

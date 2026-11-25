@@ -492,7 +492,7 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_calendar_fetch",
       label: "Outlook Calendar",
-      description: "Fetch upcoming events from Outlook personal, family, or combined calendars.",
+      description: "Fetch a rolling window of upcoming events from Outlook personal, family, or combined calendars via Microsoft Graph. For specific dates or conflict checks, use outlook_query_events with after and before.",
       parameters: Type.Object({
         calendar: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("family"), Type.Literal("all")], { description: "Which calendar to fetch: personal, family, or all (default: all)." })),
         days: Type.Optional(Type.Integer({ description: "Number of days ahead to fetch events for (default: 7)." })),
@@ -627,7 +627,7 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_query_events",
       label: "Outlook Query Events",
-      description: "Query calendar events by date range, text, attendee email, or iCalUId. Date ranges expand recurring events and include all-day and multi-day events overlapping the range.",
+      description: "Query Outlook personal or family events directly via Microsoft Graph. For scheduling and availability, set calendar, after, and before to query the exact date range, including future dates. Date ranges page through recurring and overlapping events. Also supports filtering by title, attendee email, or iCalUId.",
       parameters: Type.Object({
         after: Type.Optional(Type.String({ description: "First day to include (ISO date, e.g. 2026-03-01). Defaults to today when only `before` is given." })),
         before: Type.Optional(Type.String({ description: "Last day to include, inclusive (ISO date, e.g. 2026-04-01). Pass the same value as `after` to query a single day." })),

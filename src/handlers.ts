@@ -217,6 +217,28 @@ async function graphGet(token: string, path: string, extraHeaders: Record<string
   return JSON.parse(res);
 }
 
+async function readCalendarView(
+  token: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<Array<Record<string, unknown>>> {
+  const events: Array<Record<string, unknown>> = [];
+  const visited = new Set<string>();
+  let url: string | undefined = `${GRAPH_BASE}${path}`;
+  while (url) {
+    if (!url.startsWith(`${GRAPH_BASE}/`) || visited.has(url)) {
+      throw new Error("Microsoft Graph returned an invalid calendar continuation link");
+    }
+    visited.add(url);
+    const page: { value?: Array<Record<string, unknown>>; "@odata.nextLink"?: string } =
+      JSON.parse(await httpGet(url, token, headers));
+    if (!Array.isArray(page?.value)) throw new Error("Microsoft Graph did not return a calendar page");
+    events.push(...page.value);
+    url = page["@odata.nextLink"];
+  }
+  return events;
+}
+
 async function graphPost(token: string, path: string, body: unknown): Promise<unknown> {
   const bodyStr = JSON.stringify(body);
   const res = await httpPostJson(`${GRAPH_BASE}${path}`, token, bodyStr);
@@ -411,8 +433,7 @@ export async function fetchCalendar(
     const calId = searchNames.map(n => calMap[n]).find(Boolean);
     if (!calId) { results[key] = { label: key, error: `Calendar not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] }; continue; }
     const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
-    const evData = await graphGet(token, `/me/calendars/${calId}/calendarView?${qp}`) as { value: Array<Record<string, unknown>> };
-    const events = (evData.value ?? []).map(formatEvent);
+    const events = (await readCalendarView(token, `/me/calendars/${calId}/calendarView?${qp}`)).map(formatEvent);
     results[key] = { label: key === "personal" ? "Personal" : "Family", count: events.length, start_date: start, end_date: end, events };
   }
   return results;
@@ -774,6 +795,15 @@ export interface QueryEventsParams {
 /** Calendar timezone used when interpreting and returning query results. */
 const QUERY_TIMEZONE = "America/Los_Angeles";
 
+const queryOffset = new Intl.DateTimeFormat("en-US", { timeZone: QUERY_TIMEZONE, timeZoneName: "longOffset" });
+
+function queryMidnight(date: string): string {
+  // 08:00 UTC is midnight or 01:00 Pacific, before any DST change that day.
+  const offset = queryOffset.formatToParts(new Date(`${date}T08:00:00Z`))
+    .find(part => part.type === "timeZoneName")!.value.slice(3);
+  return `${date}T00:00:00${offset}`;
+}
+
 /** Today's date in QUERY_TIMEZONE as YYYY-MM-DD (toISOString would give UTC). */
 function todayLocalDate(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: QUERY_TIMEZONE });
@@ -847,20 +877,16 @@ export async function queryEvents(
       "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body",
       "$orderby": "start/dateTime",
       "$top": "200",
-      startDateTime: `${startDate}T00:00:00`,
-      endDateTime: `${addDays(lastDay, 1)}T00:00:00`,
+      startDateTime: queryMidnight(startDate),
+      endDateTime: queryMidnight(addDays(lastDay, 1)),
     }).toString();
 
     // Without an explicit calendar this queries the default calendar only.
     // "personal"/"family" resolve by name the same way outlook_calendar_fetch does.
     const viewPath = `${calendarBase}/calendarView?${qp}`;
 
-    const res = await graphGet(
-      token,
-      viewPath,
-      { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` },
-    ) as { value: Array<Record<string, unknown>> };
-    const events = applyFilters((res.value ?? []).map(formatEvent));
+    const rows = await readCalendarView(token, viewPath, { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` });
+    const events = applyFilters(rows.map(formatEvent));
     return { calendar: params.calendar ?? "default", start_date: startDate, end_date: lastDay, count: events.length, events };
   }
 

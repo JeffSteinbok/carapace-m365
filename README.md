@@ -287,8 +287,12 @@ All existing names remain unchanged:
 
 For personal or family conflict checks, call `outlook_query_events` with the calendar and
 inclusive `after` and `before` dates. The date range uses Pacific midnight boundaries
-and follows every Microsoft Graph calendar view page, including recurring occurrences.
-`outlook_calendar_fetch` reads a rolling window from today.
+and includes recurring occurrences. Calendar reads follow up to 50 Microsoft Graph
+calendar view pages and report an error if more pages are needed. Each Graph
+`nextLink` must match the original request's origin and pathname exactly, including
+the calendar ID's URL encoding.
+`outlook_calendar_fetch` reads a rolling window from today and accepts `days_ahead`
+as an alias for `days`.
 
 ### OneDrive tools
 

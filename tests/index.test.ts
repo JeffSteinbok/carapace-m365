@@ -442,6 +442,21 @@ describe("outlook_calendar_fetch", () => {
     expect(data.personal).toBeDefined();
     expect(Array.isArray(data.personal.events)).toBe(true);
   });
+  it("supports days_ahead and reads rolling calendar continuations", async () => {
+    const next = "https://graph.microsoft.com/v1.0/me/calendars/cal-1/calendarView?$skiptoken=next";
+    const spy = mockHttpsSeq(
+      [TOKEN, 200], [CALENDARS, 200],
+      [JSON.stringify({ value: [], "@odata.nextLink": next }), 200], [EVENTS, 200],
+    );
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools.outlook_calendar_fetch.execute("id", {
+      calendar: "personal", days_ahead: 14,
+    }));
+    expect(data.personal.count).toBe(1);
+    expect(Date.parse(data.personal.end_date) - Date.parse(data.personal.start_date)).toBe(14 * 86400000);
+    expect(spy.mock.calls.at(-1)?.[0]).toBe(next);
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -621,9 +636,9 @@ describe("outlook_query_events", () => {
     const url = String(spy.mock.calls.at(-1)?.[0]);
     expect(url).toContain("/me/calendarView");
     expect(url).not.toContain("/me/events");
-    expect(decodeURIComponent(url)).toContain("startDateTime=2026-05-01T00:00:00");
+    expect(decodeURIComponent(url)).toContain("startDateTime=2026-05-01T00:00:00-07:00");
     // `before` is inclusive, so the half-open window ends at the next midnight.
-    expect(decodeURIComponent(url)).toContain("endDateTime=2026-05-04T00:00:00");
+    expect(decodeURIComponent(url)).toContain("endDateTime=2026-05-04T00:00:00-07:00");
     expect(data.start_date).toBe("2026-05-01");
     expect(data.end_date).toBe("2026-05-03");
     expect(data.count).toBe(1);
@@ -634,8 +649,8 @@ describe("outlook_query_events", () => {
     const { api } = await loadPlugin();
     await api.tools["outlook_query_events"].execute("id", { after: "2026-05-03", before: "2026-05-03" });
     const url = decodeURIComponent(String(spy.mock.calls.at(-1)?.[0]));
-    expect(url).toContain("startDateTime=2026-05-03T00:00:00");
-    expect(url).toContain("endDateTime=2026-05-04T00:00:00");
+    expect(url).toContain("startDateTime=2026-05-03T00:00:00-07:00");
+    expect(url).toContain("endDateTime=2026-05-04T00:00:00-07:00");
   });
 
   it("requests results in the calendar timezone", async () => {
@@ -662,10 +677,96 @@ describe("outlook_query_events", () => {
 
     const url = decodeURIComponent(String(spy.mock.calls.at(-1)?.[0]));
     expect(url).toContain("/me/calendars/fam-1/calendarView");
-    expect(url).toContain("startDateTime=2027-09-01T00:00:00");
-    expect(url).toContain("endDateTime=2027-10-01T00:00:00");
+    expect(url).toContain("startDateTime=2027-09-01T00:00:00-07:00");
+    expect(url).toContain("endDateTime=2027-10-01T00:00:00-07:00");
     expect(data.calendar).toBe("family");
     expect(data.count).toBe(1);
+  });
+
+  it("reads every page of a February family query with Pacific midnight boundaries", async () => {
+    const next = "https://graph.microsoft.com/v1.0/me/calendars/fam-1/calendarView?$skiptoken=page%2Btwo";
+    const spy = mockHttpsSeq(
+      [TOKEN, 200], [CALENDARS, 200],
+      [JSON.stringify({ value: [], "@odata.nextLink": next }), 200], [EVENTS, 200],
+    );
+    const { api } = await loadPlugin();
+    const data = resultText(await api.tools["outlook_query_events"].execute("id", {
+      calendar: "family", after: "2027-02-01", before: "2027-02-28",
+    })) as { count: number };
+    const first = decodeURIComponent(String(spy.mock.calls.at(-2)?.[0]));
+    expect(first).toContain("startDateTime=2027-02-01T00:00:00-08:00");
+    expect(first).toContain("endDateTime=2027-03-01T00:00:00-08:00");
+    expect(spy.mock.calls.at(-1)?.[0]).toBe(next);
+    expect(spy.mock.calls.at(-1)?.[1]).toMatchObject({
+      headers: { Prefer: 'outlook.timezone="America/Los_Angeles"' },
+    });
+    expect(data.count).toBe(1);
+  });
+
+  it.each([
+    "https://example.invalid/v1.0/me/calendarView?$skiptoken=next",
+    "https://graph.microsoft.com/v1.0/me/events?$skiptoken=next",
+    "https://graph.microsoft.com/v1.0/me/calendarView?$skiptoken=next#",
+  ])("rejects an unsafe calendar continuation %s before requesting it", async (next) => {
+    const spy = mockHttpsSeq([TOKEN, 200], [JSON.stringify({ value: [], "@odata.nextLink": next }), 200]);
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", { after: "2027-02-01" }));
+    expect(result.error).toContain("invalid calendar continuation link");
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a calendar continuation cycle", async () => {
+    const next = "https://graph.microsoft.com/v1.0/me/calendarView?$skiptoken=next";
+    const page = JSON.stringify({ value: [], "@odata.nextLink": next });
+    const spy = mockHttpsSeq([TOKEN, 200], [page, 200], [page, 200]);
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", { after: "2027-02-01" }));
+    expect(result.error).toContain("repeated a calendar continuation link");
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops after 50 calendar pages even when every continuation is unique", async () => {
+    const pages = Array.from({ length: 50 }, (_, index): [string, number] => [
+      JSON.stringify({ value: [], "@odata.nextLink": `https://graph.microsoft.com/v1.0/me/calendarView?$skiptoken=${index}` }),
+      200,
+    ]);
+    const spy = mockHttpsSeq([TOKEN, 200], ...pages);
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", { after: "2027-02-01" }));
+    expect(result.error).toContain("50-page limit");
+    expect(spy).toHaveBeenCalledTimes(51);
+  });
+
+  it("uses the Pacific offset at each boundary of a DST-spanning range", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
+    const { api } = await loadPlugin();
+    await api.tools.outlook_query_events.execute("id", { after: "2027-03-14", before: "2027-03-14" });
+    const { searchParams } = new URL(String(spy.mock.calls.at(-1)?.[0]));
+    expect(searchParams.get("startDateTime")).toBe("2027-03-14T00:00:00-08:00");
+    expect(searchParams.get("endDateTime")).toBe("2027-03-15T00:00:00-07:00");
+  });
+
+  it.each([
+    [{ after: "2027-02-30" }, "YYYY-MM-DD"],
+    [{ after: "" }, "YYYY-MM-DD"],
+    [{ before: "2027-2-01" }, "YYYY-MM-DD"],
+    [{ after: "2027-03-02", before: "2027-03-01" }, "before must be on or after after"],
+  ])("rejects invalid date bounds %j without Graph requests", async (args, error) => {
+    const spy = mockHttpsSeq();
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", args));
+    expect(result.error).toContain(error);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [429, "{}", "HTTP 429"],
+    [200, "{}", "did not return a calendar page"],
+  ])("reports calendar page failures with HTTP status %i", async (status, body, error) => {
+    mockHttpsSeq([TOKEN, 200], [body, status]);
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools.outlook_query_events.execute("id", { after: "2027-02-01" }));
+    expect(result.error).toContain(error);
   });
 
   it("reports available calendars when the requested one is missing", async () => {

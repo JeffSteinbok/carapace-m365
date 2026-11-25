@@ -13,6 +13,7 @@ import {
   type GraphTokenManagerOptions,
 } from "@carapace/m365-graph-auth";
 import { DirectTokenStateStore } from "./direct-token-state.js";
+import { continuationPath, GRAPH_BASE } from "./graph-url.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,7 +37,7 @@ export interface OutlookCalendarConfig {
 // Constants
 // ---------------------------------------------------------------------------
 
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+const CALENDAR_PAGE_LIMIT = 50;
 const SCOPES = {
   calendarRead: ["Calendars.Read"],
   calendarWrite: ["Calendars.ReadWrite"],
@@ -62,10 +63,10 @@ function taskReadScopes(config: OutlookCalendarConfig): readonly string[] {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-function httpGet(url: string, token: string, extraHeaders: Record<string, string> = {}): Promise<string> {
+function httpGet(url: string, token: string, extraHeaders: Record<string, string> = {}): Promise<{ status: number; data: string }> {
   return new Promise((resolve, reject) => {
     const req = https.request(url, { method: "GET", headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...extraHeaders }, timeout: 30_000 }, res => {
-      let data = ""; res.on("data", (c: Buffer) => data += c); res.on("end", () => resolve(data));
+      let data = ""; res.on("data", (c: Buffer) => data += c); res.on("end", () => resolve({ status: res.statusCode ?? 0, data }));
     });
     req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); }); req.end();
   });
@@ -214,7 +215,35 @@ function httpPatch(url: string, body: string, token: string): Promise<string> {
 
 async function graphGet(token: string, path: string, extraHeaders: Record<string, string> = {}): Promise<unknown> {
   const res = await httpGet(`${GRAPH_BASE}${path}`, token, extraHeaders);
-  return JSON.parse(res);
+  return JSON.parse(res.data);
+}
+
+async function readCalendarView(
+  token: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<Array<Record<string, unknown>>> {
+  const events: Array<Record<string, unknown>> = [];
+  const visited = new Set<string>();
+  let pagePath = path;
+  for (let pageNumber = 0; pageNumber < CALENDAR_PAGE_LIMIT; pageNumber++) {
+    if (visited.has(pagePath)) throw new Error("Microsoft Graph repeated a calendar continuation link");
+    visited.add(pagePath);
+    const response = await httpGet(`${GRAPH_BASE}${pagePath}`, token, headers);
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Microsoft Graph calendar page request failed (HTTP ${response.status})`);
+    }
+    const page: { value?: Array<Record<string, unknown>>; "@odata.nextLink"?: unknown } =
+      JSON.parse(response.data);
+    if (!Array.isArray(page?.value)) throw new Error("Microsoft Graph did not return a calendar page");
+    events.push(...page.value);
+    const next = page["@odata.nextLink"];
+    if (next === undefined) return events;
+    const linkError = "Microsoft Graph returned an invalid calendar continuation link";
+    if (typeof next !== "string") throw new Error(linkError);
+    pagePath = continuationPath(next, path, linkError);
+  }
+  throw new Error(`Microsoft Graph calendar query exceeded the ${CALENDAR_PAGE_LIMIT}-page limit`);
 }
 
 async function graphPost(token: string, path: string, body: unknown): Promise<unknown> {
@@ -411,8 +440,7 @@ export async function fetchCalendar(
     const calId = searchNames.map(n => calMap[n]).find(Boolean);
     if (!calId) { results[key] = { label: key, error: `Calendar not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] }; continue; }
     const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
-    const evData = await graphGet(token, `/me/calendars/${calId}/calendarView?${qp}`) as { value: Array<Record<string, unknown>> };
-    const events = (evData.value ?? []).map(formatEvent);
+    const events = (await readCalendarView(token, `/me/calendars/${calId}/calendarView?${qp}`)).map(formatEvent);
     results[key] = { label: key === "personal" ? "Personal" : "Family", count: events.length, start_date: start, end_date: end, events };
   }
   return results;
@@ -774,6 +802,15 @@ export interface QueryEventsParams {
 /** Calendar timezone used when interpreting and returning query results. */
 const QUERY_TIMEZONE = "America/Los_Angeles";
 
+const queryOffset = new Intl.DateTimeFormat("en-US", { timeZone: QUERY_TIMEZONE, timeZoneName: "longOffset" });
+
+function queryMidnight(date: string): string {
+  // 08:00 UTC is midnight or 01:00 Pacific, before any DST change that day.
+  const offset = queryOffset.formatToParts(new Date(`${date}T08:00:00Z`))
+    .find(part => part.type === "timeZoneName")!.value.slice(3);
+  return `${date}T00:00:00${offset}`;
+}
+
 /** Today's date in QUERY_TIMEZONE as YYYY-MM-DD (toISOString would give UTC). */
 function todayLocalDate(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: QUERY_TIMEZONE });
@@ -781,16 +818,34 @@ function todayLocalDate(): string {
 
 /** Shift a YYYY-MM-DD date string by N days without timezone drift. */
 function addDays(date: string, days: number): string {
-  const [y, m, d] = date.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dt = new Date(`${date}T00:00:00Z`);
   dt.setUTCDate(dt.getUTCDate() + days);
-  return dt.toISOString().slice(0, 10);
+  return dt.toISOString().split("T")[0];
+}
+
+function validQueryDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && addDays(value, 0) === value;
 }
 
 export async function queryEvents(
   config: OutlookCalendarConfig,
   params: QueryEventsParams,
 ): Promise<unknown> {
+  const hasDateRange = !params.uid && (params.after !== undefined || params.before !== undefined);
+  const startDate = hasDateRange ? params.after ?? todayLocalDate() : undefined;
+  let lastDay: string | undefined;
+  let endDate: string | undefined;
+  if (startDate !== undefined) {
+    if (!validQueryDate(startDate) || (params.before !== undefined && !validQueryDate(params.before))) {
+      return { error: "Use valid YYYY-MM-DD dates for after and before." };
+    }
+    if (params.before !== undefined && params.before < startDate) {
+      return { error: "before must be on or after after." };
+    }
+    lastDay = params.before ?? addDays(startDate, 90);
+    endDate = addDays(lastDay, 1);
+    if (!validQueryDate(endDate)) return { error: "Calendar query end date is out of range." };
+  }
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
   const token = await getGraphAccessToken(config, SCOPES.calendarRead);
@@ -838,29 +893,23 @@ export async function queryEvents(
   // filtering it on start/end drops all-day and multi-day events that straddle
   // a boundary. calendarView expands recurrences and returns anything
   // overlapping the window, which is what a "what's on this date" query means.
-  if (params.after || params.before) {
-    const startDate = params.after ?? todayLocalDate();
-    const lastDay = params.before ?? addDays(startDate, 90);
+  if (startDate !== undefined && lastDay !== undefined && endDate !== undefined) {
     // `before` names a day the caller wants included, so the half-open window
     // runs to the start of the following day.
     const qp = new URLSearchParams({
       "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body",
       "$orderby": "start/dateTime",
       "$top": "200",
-      startDateTime: `${startDate}T00:00:00`,
-      endDateTime: `${addDays(lastDay, 1)}T00:00:00`,
+      startDateTime: queryMidnight(startDate),
+      endDateTime: queryMidnight(endDate),
     }).toString();
 
     // Without an explicit calendar this queries the default calendar only.
     // "personal"/"family" resolve by name the same way outlook_calendar_fetch does.
     const viewPath = `${calendarBase}/calendarView?${qp}`;
 
-    const res = await graphGet(
-      token,
-      viewPath,
-      { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` },
-    ) as { value: Array<Record<string, unknown>> };
-    const events = applyFilters((res.value ?? []).map(formatEvent));
+    const rows = await readCalendarView(token, viewPath, { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` });
+    const events = applyFilters(rows.map(formatEvent));
     return { calendar: params.calendar ?? "default", start_date: startDate, end_date: lastDay, count: events.length, events };
   }
 

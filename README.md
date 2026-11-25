@@ -285,6 +285,15 @@ All existing names remain unchanged:
 - Tasks: `outlook_task_lists`, `outlook_tasks`, `outlook_create_task`,
   `outlook_update_task`, `outlook_complete_task`, `outlook_delete_task`
 
+For personal or family conflict checks, call `outlook_query_events` with the calendar and
+inclusive `after` and `before` dates. The date range uses Pacific midnight boundaries
+and includes recurring occurrences. Calendar reads follow up to 50 Microsoft Graph
+calendar view pages and report an error if more pages are needed. Each Graph
+`nextLink` must match the original request's origin and pathname exactly, including
+the calendar ID's URL encoding.
+`outlook_calendar_fetch` reads a rolling window from today and accepts `days_ahead`
+as an alias for `days`.
+
 ### OneDrive tools
 
 These tools are hidden by default. Enable `onedrive-read` for the read tools or

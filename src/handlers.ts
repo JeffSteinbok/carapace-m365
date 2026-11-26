@@ -1002,7 +1002,7 @@ export async function saveAttachments(
   params: { message_id: string; output_dir?: string; content_types?: string[] },
 ): Promise<unknown> {
   const { link, lstat, mkdtemp, realpath, rm, rmdir, stat, unlink, writeFile } = await import("node:fs/promises");
-  const { isAbsolute, join } = await import("node:path");
+  const { basename, isAbsolute, join } = await import("node:path");
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   const configuredDir = config.attachmentSaveDirectory;
@@ -1035,13 +1035,13 @@ export async function saveAttachments(
       const matches = filters.some(f => f.endsWith("/*") ? ct.startsWith(f.slice(0, -1)) : ct === f);
       if (!matches || typeof att.contentBytes !== "string") continue;
       const originalName = String(att.name ?? "");
-      const basename = originalName.split(/[/\\]/).at(-1) ?? "";
+      const leaf = basename(originalName);
       const reservedOnWindows = process.platform === "win32" && (
-        /[<>:"|?*\x00-\x1f]|[. ]$/.test(basename) ||
-        /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(basename)
+        /[<>:"|?*\x00-\x1f]|[. ]$/.test(leaf) ||
+        /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(leaf)
       );
-      const name = basename && basename !== "." && basename !== ".." && !basename.includes("\0") && !reservedOnWindows
-        ? basename
+      const name = leaf && leaf !== "." && leaf !== ".." && !leaf.includes("\0") && !reservedOnWindows
+        ? leaf
         : `attachment-${createHash("sha256").update(originalName).digest("hex").slice(0, 12)}`;
       const file = join(destination, name);
       const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => {

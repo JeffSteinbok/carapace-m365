@@ -5,19 +5,19 @@ import {
 } from "carapace-mail-runtime";
 import { log } from "./config.js";
 
-export function deliver(message: string, channel: string, target: string): void {
+export function deliver(message: string, channel: string, target: string, logger = log): void {
   execFile(
     "openclaw",
     ["message", "send", "--channel", channel, "--target", target, "--message", message],
     { timeout: 30_000, maxBuffer: 256 * 1024, windowsHide: true },
     (error, _stdout, stderr) => {
       if (!error) {
-        log(`delivered: ${message}`);
+        logger(`delivered: ${message}`);
         return;
       }
       const detail = String(stderr).trim().slice(0, 200) || error.message;
       const timeout = error.killed ? " (timed out after 30s)" : "";
-      log(`delivery failed${timeout}: ${detail}`);
+      logger(`delivery failed${timeout}: ${detail}`);
     },
   );
 }
@@ -35,6 +35,7 @@ export function handoffToAgent(
   message: string,
   sessionKey?: string,
   reply?: { channel: string; target: string },
+  logger = log,
 ): void {
   execFile(
     "openclaw",
@@ -54,33 +55,45 @@ export function handoffToAgent(
     { timeout: 150_000, maxBuffer: 256 * 1024, windowsHide: true },
     (error, _stdout, stderr) => {
       if (!error) {
-        log(`handoff delivered to agent ${agent}`);
+        logger(`handoff delivered to agent ${agent}`);
         return;
       }
       const detail = String(stderr).trim().slice(0, 200) || error.message;
       const timeout = error.killed ? " (timed out after 150s)" : "";
-      log(`agent handoff failed${timeout}: ${detail}`);
+      logger(`agent handoff failed${timeout}: ${detail}`);
     },
   );
 }
 
 export function dispatchResults(
   results: ActionResult[],
-  config: { channel: string; target: string },
+  config: { channel: string; target: string; logger?: typeof log; allowedAgents: readonly string[] | undefined },
 ): void {
-  dispatchActionResults(results, {
-    logger: log,
+  const logger = config.logger ?? log;
+  const permitted = results.filter((result) => {
+    if (result.kind !== "agent_handoff" || config.allowedAgents === undefined) return true;
+    const agent = result.payload.agent ?? "main";
+    const session = result.payload.session;
+    if (typeof agent === "string" && config.allowedAgents.includes(agent)
+        && (session === undefined || (typeof session === "string" && session.startsWith(`agent:${agent}:`)))) return true;
+    logger("refused agent handoff outside the account allowlist");
+    return false;
+  });
+  dispatchActionResults(permitted, {
+    logger,
     handlers: {
       message: (payload) => deliver(
         payload.message as string,
         config.channel,
         config.target,
+        logger,
       ),
       agent_handoff: (payload) => handoffToAgent(
         (payload.agent as string) ?? "main",
         payload.message as string,
         payload.session as string | undefined,
         { channel: config.channel, target: config.target },
+        logger,
       ),
     },
   });

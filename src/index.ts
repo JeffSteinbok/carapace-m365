@@ -72,12 +72,25 @@ import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
  */
 export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 
+const accountSchema = Type.Object({
+  agents: Type.Array(Type.String(), { minItems: 1 }),
+  tokenBrokerUrl: Type.String({ minLength: 1 }),
+  tokenBrokerSecret: Type.String({ minLength: 1 }),
+  features: Type.Array(Type.String()),
+  familyCalendarNames: Type.Optional(Type.Array(Type.String())),
+  maskPrivateFamilyEvents: Type.Optional(Type.Boolean()),
+  personalCalendarNames: Type.Optional(Type.Array(Type.String())),
+  access: Type.Optional(Type.Unsafe<AccessConfig>(ACCESS_CONFIG_SCHEMA)),
+});
+
 const createBaseEntry = definePlugin({
   id: "m365",
   name: "Microsoft 365",
   description: "Outlook mail, calendar, tasks, and OneDrive tools via Microsoft Graph",
 
   configSchema: Type.Object({
+    accounts: Type.Optional(Type.Record(Type.String(), accountSchema)),
+    defaultAgents: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })),
     clientId: Type.Optional(Type.String({ description: "Microsoft OAuth client ID" })),
     clientSecret: Type.Optional(Type.String({ description: "Microsoft OAuth client secret" })),
     refreshToken: Type.Optional(Type.String({ description: "Microsoft OAuth refresh token" })),
@@ -863,7 +876,26 @@ const createBaseEntry = definePlugin({
       },
     }),
 
-  ],
+  ].map((definition) => ({
+    ...definition,
+    async execute(params, rawConfig, ctx) {
+      const config = rawConfig as Parameters<typeof selectAccount>[0];
+      try {
+        const account = selectAccount(config, ctx);
+        const selected = account ?? config;
+        if (config.accounts || config.defaultAgents) {
+          const required = TOOL_REQUIRED_FEATURE[definition.name as keyof typeof TOOL_REQUIRED_FEATURE];
+          const defaultOnly = definition.name === "outlook_search_store" || definition.name === "outlook_meeting";
+          if ((account && defaultOnly) || !required || !isM365FeatureEnabled(configuredFeatures(selected), required)) {
+            return { error: "Tool unavailable for this Microsoft 365 account" };
+          }
+        }
+        return await definition.execute(params, selected, ctx);
+      } catch (error) {
+        return { error: (error as Error).message };
+      }
+    },
+  })),
 });
 
 export const TOOL_REQUIRED_FEATURE = {
@@ -913,13 +945,44 @@ function configuredFeatures(config: Record<string, unknown> | undefined): M365Fe
   return parseM365Features(envFeatures || undefined);
 }
 
+type MappedAccount = import("@sinclair/typebox").Static<typeof accountSchema>;
+
+function selectAccount(
+  config: { accounts?: Record<string, MappedAccount>; defaultAgents?: string[] },
+  ctx: ToolCallContext | undefined,
+): MappedAccount | undefined {
+  if (!config.accounts && !config.defaultAgents) return undefined;
+  if (!ctx?.agentId) throw new Error("An authenticated agent context is required");
+  const agentId = ctx.agentId;
+  const matches = Object.values(config.accounts ?? {}).filter((account) => account.agents.includes(agentId));
+  if (matches.length > 1) throw new Error("Agent is assigned to multiple Microsoft 365 accounts");
+  const account = matches[0];
+  const defaultAllowed = config.defaultAgents?.includes(agentId);
+  if (!account && defaultAllowed) return undefined;
+  if (!account) throw new Error("Agent has no Microsoft 365 account assignment");
+  if (defaultAllowed) throw new Error("Agent is assigned to multiple Microsoft 365 accounts");
+  if (!account.tokenBrokerSecret.trim() || !account.tokenBrokerUrl.trim()) {
+    throw new Error("Mapped Microsoft 365 account requires its own broker URL and secret");
+  }
+  const fallback = resolveConfig(config as Parameters<typeof resolveConfig>[0]);
+  if (account.tokenBrokerUrl.trim() === fallback.tokenBrokerUrl
+      || account.tokenBrokerSecret.trim() === fallback.tokenBrokerSecret) {
+    throw new Error("Mapped Microsoft 365 account shares default broker credentials or URL");
+  }
+  return { ...account, familyCalendarNames: account.familyCalendarNames ?? [], personalCalendarNames: account.personalCalendarNames ?? [] };
+}
+
 export function createEntry(): PluginEntry {
   const entry = createBaseEntry();
   const registerAll = entry.register.bind(entry);
   return {
     ...entry,
     register(api: PluginApi) {
-      const features = configuredFeatures(api.pluginConfig);
+      const features = [
+        ...configuredFeatures(api.pluginConfig),
+        ...Object.values((api.pluginConfig?.accounts ?? {}) as Record<string, MappedAccount>)
+          .flatMap((account) => configuredFeatures(account)),
+      ];
       registerAll({
         ...api,
         registerTool(tool: unknown, opts?: { name?: string }) {
@@ -971,6 +1034,7 @@ async function eventWriteDenied(
 ): Promise<{ error: string } | undefined> {
   if (!isAccessControlled(config.access, CALENDARS)) return undefined;
   const found = await resolveEventCalendar(resolveConfig(config), eventId);
+  if (found.privateSharedEvent) return { error: "Private shared events can be changed by their owner." };
   if (found.error) return { error: `Access check failed: could not determine the calendar of event "${eventId}": ${found.error}` };
   if (!found.key) {
     const unknownId = `other:${found.name ?? "unknown"}`;
@@ -995,6 +1059,7 @@ export function resolveConfig(config: {
   oneDriveDeniedPaths?: string[];
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
+  maskPrivateFamilyEvents?: boolean;
 }): OutlookCalendarConfig {
   const env = (name: string): string => process.env[name]?.trim() || "";
   const parseNames = (values: string[] | undefined, key: string): string[] => {
@@ -1018,6 +1083,7 @@ export function resolveConfig(config: {
     tokenBrokerSecret: brokerSecret,
     features: configuredFeatures(config),
     oneDriveDeniedPaths: config.oneDriveDeniedPaths,
+    maskPrivateFamilyEvents: config.maskPrivateFamilyEvents,
     personalCalendarNames: parseNames(
       config.personalCalendarNames,
       "M365_PERSONAL_CALENDAR_NAMES",

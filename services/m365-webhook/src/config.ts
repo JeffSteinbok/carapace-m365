@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   parseM365Features,
   type M365Feature,
@@ -41,6 +41,10 @@ export interface MailRule {
 }
 
 export interface ServiceConfig {
+  accountId?: string;
+  legacyTokenPath?: boolean;
+  allowedAgents?: string[];
+  logger?: typeof log;
   bind: string;
   port: number;
   tokenPath: string;
@@ -80,7 +84,87 @@ function normalizePath(value: string, fallback: string): string {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
-export function loadServiceConfig(): ServiceConfig {
+export function loadServiceConfig(): { accounts: ServiceConfig[] } {
+  const accountsPath = env("M365_ACCOUNTS_PATH");
+  if (!accountsPath) return { accounts: [baseConfig()] };
+  const { accounts } = JSON.parse(readFileSync(accountsPath, "utf8")) as {
+    accounts: Record<string, {
+      statePath: string;
+      rulesPath: string;
+      pipelineWorkspace: string;
+      logPath: string;
+      mailStorePath?: string;
+      brokerSecretEnv: string;
+      clientStateEnv: string;
+      features: string | string[];
+      notify: { channel: string; target: string };
+      legacyTokenPath?: boolean;
+      allowedAgents: string[];
+    }>;
+  };
+  const paths = new Set<string>();
+  const secrets = new Set<string>();
+  const files = new Set<string>();
+  let legacy = false;
+  function accountPath(value: string): string {
+    const path = resolve(required(value?.trim(), "account path").replace(/^~\//, homedir() + "/"));
+    function canonical(candidate: string): string {
+      if (existsSync(candidate)) return realpathSync(candidate);
+      return join(canonical(dirname(candidate)), basename(candidate));
+    }
+    const key = canonical(path);
+    const stat = existsSync(path) ? statSync(path) : undefined;
+    const inode = stat && `${stat.dev}:${stat.ino}`;
+    if (paths.has(key) || (inode && files.has(inode))) throw new Error("Shared Microsoft 365 account path");
+    paths.add(key);
+    if (inode) files.add(inode);
+    return path;
+  }
+  const entries = Object.entries(accounts);
+  if (!entries.length) throw new Error("At least one Microsoft 365 account is required");
+  return { accounts: entries.map(([accountId, entry]) => {
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(accountId)) throw new Error("Invalid account ID");
+    if (entry.legacyTokenPath && legacy) throw new Error("Multiple legacy token routes");
+    legacy ||= entry.legacyTokenPath === true;
+    const tokenBrokerSecret = required(env(entry.brokerSecretEnv), "account broker secret");
+    const webhookClientState = required(env(entry.clientStateEnv), "account client state");
+    for (const secret of [tokenBrokerSecret, webhookClientState]) {
+      if (secrets.has(secret)) throw new Error("Shared Microsoft 365 account credential");
+      secrets.add(secret);
+    }
+    if (entry.features === undefined) throw new Error("Account features must be specified");
+    if (!Array.isArray(entry.allowedAgents) ||
+        entry.allowedAgents.some((agent) => typeof agent !== "string" || !/^[a-z0-9_-]+$/.test(agent))) {
+      throw new Error("Invalid account agent allowlist");
+    }
+    const mailStorePath = entry.mailStorePath || (entry.legacyTokenPath ? env("M365_MAIL_STORE_PATH") : "");
+    const logPath = accountPath(entry.logPath);
+    const logger = (message: string): void => {
+      try {
+        appendFileSync(logPath, `[${new Date().toISOString()}] [${accountId}] ${message}\n`, { mode: 0o600 });
+      } catch {
+        log("Failed to write an account log");
+      }
+    };
+    return baseConfig({
+      accountId,
+      legacyTokenPath: entry.legacyTokenPath,
+      allowedAgents: entry.allowedAgents,
+      logger,
+      tokenBrokerSecret,
+      webhookClientState,
+      statePath: accountPath(entry.statePath),
+      runtimeConfigPath: accountPath(entry.rulesPath),
+      pipelineWorkspace: accountPath(entry.pipelineWorkspace),
+      features: parseM365Features(entry.features),
+      notifyTarget: required(entry.notify?.target, "account notify target"),
+      notifyChannel: required(entry.notify?.channel, "account notify channel"),
+      mailStorePath: mailStorePath ? accountPath(mailStorePath) : undefined,
+    });
+  }) };
+}
+
+function baseConfig(account?: Partial<ServiceConfig>): ServiceConfig {
   const home = homedir();
   const statePath = env("M365_WEBHOOK_STATE_PATH")
     || join(home, ".openclaw/state/m365-webhook.json");
@@ -101,7 +185,7 @@ export function loadServiceConfig(): ServiceConfig {
       env("M365_TOKEN_BROKER_PATH"),
       "/token",
     ),
-    tokenBrokerSecret: required(
+    tokenBrokerSecret: account?.tokenBrokerSecret ?? required(
       env("M365_TOKEN_BROKER_SECRET"),
       "M365_TOKEN_BROKER_SECRET",
     ),
@@ -113,7 +197,7 @@ export function loadServiceConfig(): ServiceConfig {
       env("M365_WEBHOOK_URL"),
       "M365_WEBHOOK_URL",
     ),
-    webhookClientState: required(
+    webhookClientState: account?.webhookClientState ?? required(
       env("M365_WEBHOOK_CLIENT_STATE"),
       "M365_WEBHOOK_CLIENT_STATE",
     ),
@@ -130,22 +214,23 @@ export function loadServiceConfig(): ServiceConfig {
     features: parseM365Features(
       env("M365_FEATURES") || undefined,
     ),
-    initialRefreshToken: env("M365_REFRESH_TOKEN") || undefined,
-    notifyTarget: required(process.env.NOTIFY_TARGET?.trim() || "", "NOTIFY_TARGET"),
+    initialRefreshToken: account ? undefined : env("M365_REFRESH_TOKEN") || undefined,
+    notifyTarget: account?.notifyTarget ?? required(process.env.NOTIFY_TARGET?.trim() || "", "NOTIFY_TARGET"),
     notifyChannel: process.env.NOTIFY_CHANNEL?.trim() || "discord",
     mailStorePath: env("M365_MAIL_STORE_PATH") || undefined,
+    ...account,
   };
 }
 
-export function loadRuntimeConfig(path: string): RuntimeConfig {
+export function loadRuntimeConfig(path: string, logger = log): RuntimeConfig {
   if (!existsSync(path)) {
-    log(`No runtime config found at ${path}; starting with empty rules`);
+    logger(`No runtime config found at ${path}; starting with empty rules`);
     return {};
   }
   try {
     return JSON.parse(readFileSync(path, "utf8")) as RuntimeConfig;
   } catch (error) {
-    log(`Invalid runtime config at ${path}: ${error}; using empty rules`);
+    logger(`Invalid runtime config at ${path}: ${error}; using empty rules`);
     return {};
   }
 }
@@ -154,13 +239,13 @@ export function buildPipelineRules(config: RuntimeConfig): MailRule[] {
   return [...(config.mail_rules ?? [])];
 }
 
-export function buildTrustedForwarders(config: RuntimeConfig): TrustedForwarder[] {
+export function buildTrustedForwarders(config: RuntimeConfig, logger = log): TrustedForwarder[] {
   const forwarders: TrustedForwarder[] = [];
   for (const entry of config.trusted_forwarders ?? []) {
     const srs = typeof entry?.srs_domain === "string" ? entry.srs_domain.trim().toLowerCase() : "";
     const authserv = typeof entry?.authserv_id === "string" ? entry.authserv_id.trim().toLowerCase() : "";
     if (!srs || !authserv) {
-      log(`ignoring trusted_forwarders entry without srs_domain and authserv_id: ${JSON.stringify(entry)}`);
+      logger(`ignoring trusted_forwarders entry without srs_domain and authserv_id: ${JSON.stringify(entry)}`);
       continue;
     }
     forwarders.push({ srs_domain: srs, authserv_id: authserv });

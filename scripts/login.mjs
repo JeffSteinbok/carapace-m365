@@ -2,6 +2,8 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
   DEFAULT_M365_FEATURES,
@@ -36,6 +38,8 @@ Usage:
 
 Options:
   --features <list>  Comma-separated feature names
+  --device-code      Sign in on a separate device (requires public client flows)
+  --token-file <p>   Write refresh token to a new private file
   --scopes <list>    Explicit comma- or space-separated delegated scopes
   --client-id <id>   Azure application client ID
   --tenant <tenant>  consumers (default), common, organizations, or tenant ID
@@ -174,6 +178,62 @@ async function exchange(code) {
   return body;
 }
 
+const tokenFile = arg("token-file", "");
+if ((hasArg("device-code") || hasArg("token-file")) && (!tokenFile || tokenFile.startsWith("--"))) {
+  console.error("Specify a new private path with --token-file.");
+  process.exit(1);
+}
+
+async function postOAuth(url, parameters) {
+  const response = await fetch(url, {
+    method: "POST",
+    body: new URLSearchParams(parameters),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return response.json();
+}
+
+async function deviceLogin() {
+  const device = await postOAuth(tokenUrl.replace(/\/token$/, "/devicecode"), { client_id: clientId, scope });
+  if (!device.device_code || !device.user_code || !device.verification_uri || !device.expires_in) {
+    throw new Error(`Device authorization failed: ${device.error ?? "invalid response"}`);
+  }
+  console.log(`Open ${device.verification_uri} and enter ${device.user_code}.`);
+  const expires = Date.now() + device.expires_in * 1000;
+  let interval = Math.max(5, Number(device.interval) || 0);
+  while (Date.now() + interval * 1000 < expires) {
+    await delay(interval * 1000);
+    const tokens = await postOAuth(tokenUrl, {
+      client_id: clientId,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: device.device_code,
+    });
+    if (tokens.refresh_token) return tokens.refresh_token;
+    if (tokens.error === "authorization_pending") continue;
+    if (tokens.error === "slow_down") {
+      interval += 5;
+      continue;
+    }
+    throw new Error(`Device sign-in failed: ${tokens.error ?? "no refresh token"}`);
+  }
+  throw new Error("The Microsoft device code expired");
+}
+
+function saveToken(token) {
+  writeFileSync(tokenFile, token + "\n", { mode: 0o600, flag: "wx" });
+  console.log("Refresh token saved to the private output file.");
+}
+
+if (hasArg("device-code")) {
+  try {
+    saveToken(await deviceLogin());
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+}
+
+if (!hasArg("device-code")) {
 const authorizationUrl = `${authUrlBase}?${new URLSearchParams({
   client_id: clientId,
   response_type: "code",
@@ -231,6 +291,10 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end("<h1>Signed in</h1><p>You can close this tab and return to the terminal.</p>");
+    if (tokenFile) {
+      saveToken(tokens.refresh_token);
+      return;
+    }
     console.log("\nRefresh token acquired. Store it in the webhook service state or environment:\n");
     console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
     console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
@@ -262,3 +326,5 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`${authorizationUrl}\n`);
   openBrowser(authorizationUrl);
 });
+
+}

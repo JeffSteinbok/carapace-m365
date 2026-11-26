@@ -31,6 +31,7 @@ export interface OutlookCalendarConfig {
   oneDriveDeniedPaths?: string[];
   personalCalendarNames: string[];
   familyCalendarNames: string[];
+  maskPrivateFamilyEvents?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +332,16 @@ async function resolveTaskList(
 // Helpers
 // ---------------------------------------------------------------------------
 
+function shareableSensitivity(value: unknown): boolean {
+  return typeof value === "string" && ["normal", "personal", "confidential"].includes(value.toLowerCase());
+}
+
+function formatSharedFamilyEvent(event: Record<string, unknown>): Record<string, unknown> {
+  const formatted = formatEvent(event);
+  if (shareableSensitivity(event.sensitivity)) return formatted;
+  return { subject: "busy (private)", start: formatted.start, end: formatted.end, show_as: "busy" };
+}
+
 function utcToLocal(s: string): string {
   try {
     const dt = new Date(s.slice(0, 19) + "Z");
@@ -353,6 +364,7 @@ function formatEvent(e: Record<string, unknown>): Record<string, unknown> {
     organizer: ((e.organizer as Record<string, Record<string, string>>)?.emailAddress?.name || ((e.organizer as Record<string, Record<string, string>>)?.emailAddress?.address ?? "")),
     my_status: ((e.responseStatus as Record<string, string>)?.response ?? "none"), show_as: String(e.showAs ?? "busy"),
     is_all_day: Boolean(e.isAllDay),
+    ...(typeof e.sensitivity === "string" ? { sensitivity: e.sensitivity } : {}),
   };
   if (attendees.length) result.attendees = attendees;
   const bodyObj = e.body as Record<string, string> | undefined;
@@ -439,8 +451,8 @@ export async function fetchCalendar(
     const searchNames = calendarSearchNames(config, key);
     const calId = searchNames.map(n => calMap[n]).find(Boolean);
     if (!calId) { results[key] = { label: key, error: `Calendar not found. Available: ${Object.keys(calMap).join(", ")}`, events: [] }; continue; }
-    const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
-    const events = (await readCalendarView(token, `/me/calendars/${calId}/calendarView?${qp}`)).map(formatEvent);
+    const qp = new URLSearchParams({ "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body,sensitivity", "$orderby": "start/dateTime", "$top": "100", "startDateTime": `${start}T00:00:00`, "endDateTime": `${end}T00:00:00` }).toString();
+    const events = (await readCalendarView(token, `/me/calendars/${calId}/calendarView?${qp}`)).map(key === "family" && config.maskPrivateFamilyEvents ? formatSharedFamilyEvent : formatEvent);
     results[key] = { label: key === "personal" ? "Personal" : "Family", count: events.length, start_date: start, end_date: end, events };
   }
   return results;
@@ -672,7 +684,7 @@ export async function updateEvent(
 export async function resolveEventCalendar(
   config: OutlookCalendarConfig,
   eventId: string,
-): Promise<{ key?: string; name?: string; error?: string }> {
+): Promise<{ key?: string; name?: string; error?: string; privateSharedEvent?: boolean }> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
   if (!eventId) return { error: "event_id is required" };
@@ -689,7 +701,13 @@ export async function resolveEventCalendar(
   for (const key of Object.keys(CALENDAR_DEFAULTS)) {
     const names = calendarSearchNames(config, key);
     const resolvedId = names.map(n => calMap[n]).find(Boolean);
-    if (resolvedId ? resolvedId === cal.id : names.includes(name)) return { key, name: cal.name };
+    if (resolvedId ? resolvedId === cal.id : names.includes(name)) {
+      if (key !== "family" || !config.maskPrivateFamilyEvents) return { key, name: cal.name };
+      const event = await graphGet(token, `/me/events/${encodeURIComponent(eventId)}?$select=sensitivity`) as {
+        sensitivity?: string;
+      };
+      return { key, name: cal.name, privateSharedEvent: !shareableSensitivity(event?.sensitivity) };
+    }
   }
   return { key: undefined, name: cal.name };
 }
@@ -866,10 +884,18 @@ export async function queryEvents(
     calendarBase = `/me/calendars/${calId}`;
   }
 
+  if (params.calendar === "family" && config.maskPrivateFamilyEvents &&
+      (params.uid || params.text || params.attendee)) {
+    return { error: "Use a date range without identity filters for this shared calendar" };
+  }
+
   if (params.uid) {
     const res = await graphGet(token, `${calendarBase}/events?$filter=iCalUId eq '${esc(params.uid)}'`) as { value: Array<Record<string, unknown>> };
     return { events: (res.value ?? []).map(formatEvent) };
   }
+
+  const format = params.calendar === "family" && config.maskPrivateFamilyEvents
+    ? formatSharedFamilyEvent : formatEvent;
 
   const applyFilters = (events: Array<Record<string, unknown>>) => {
     let out = events;
@@ -897,7 +923,7 @@ export async function queryEvents(
     // `before` names a day the caller wants included, so the half-open window
     // runs to the start of the following day.
     const qp = new URLSearchParams({
-      "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body",
+      "$select": "id,subject,start,end,location,organizer,attendees,responseStatus,showAs,isAllDay,body,sensitivity",
       "$orderby": "start/dateTime",
       "$top": "200",
       startDateTime: queryMidnight(startDate),
@@ -909,7 +935,7 @@ export async function queryEvents(
     const viewPath = `${calendarBase}/calendarView?${qp}`;
 
     const rows = await readCalendarView(token, viewPath, { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` });
-    const events = applyFilters(rows.map(formatEvent));
+    const events = applyFilters(rows.map(format));
     return { calendar: params.calendar ?? "default", start_date: startDate, end_date: lastDay, count: events.length, events };
   }
 
@@ -918,7 +944,7 @@ export async function queryEvents(
     ? `?$filter=${encodeURIComponent(`contains(subject,'${esc(params.text)}')`)}&$top=50&$orderby=start/dateTime`
     : `?$top=20&$orderby=start/dateTime`;
   const res = await graphGet(token, `${calendarBase}/events${qs}`) as { value: Array<Record<string, unknown>> };
-  const events = applyFilters((res.value ?? []).map(formatEvent));
+  const events = applyFilters((res.value ?? []).map(format));
 
   return { count: events.length, events };
 }

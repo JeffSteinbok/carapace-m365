@@ -4,6 +4,7 @@ import http, {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { basename, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   getDisallowedGraphScopes,
@@ -14,12 +15,14 @@ import {
   ActionRegistry,
   registerBuiltinActions,
   type ActionPlugin,
+  normalizeAction,
 } from "carapace-mail-runtime";
 import {
   buildPipelineRules,
   loadRuntimeConfig,
   buildTrustedForwarders,
   type TrustedForwarder,
+  type RuntimeConfig,
   loadServiceConfig,
   log,
   RENEWAL_CHECK_INTERVAL_MS,
@@ -32,6 +35,8 @@ import {
   handleNotification,
   handleValidation,
   readBody,
+  parseNotifications,
+  clientStateMatches,
 } from "./handlers.js";
 import { MailStore } from "@carapace/m365-mail-store";
 import { StateStore } from "./state.js";
@@ -68,6 +73,7 @@ async function handleTokenRequest(
     tokenSource: TokenSource;
     secret: string;
     features: ServiceConfig["features"];
+    forbiddenStatus?: number;
   },
 ): Promise<void> {
   if (req.method !== "POST") {
@@ -79,7 +85,7 @@ async function handleTokenRequest(
     ? req.headers.authorization[0]
     : req.headers.authorization;
   if (!secretMatches(authorization, options.secret)) {
-    res.writeHead(401, {
+    res.writeHead(options.forbiddenStatus ?? 401, {
       "WWW-Authenticate": "Bearer",
       "Cache-Control": "no-store",
     });
@@ -123,7 +129,7 @@ async function handleTokenRequest(
   }
 }
 
-export function createServiceServer(options: {
+interface ServerOptions {
   config: Pick<
     ServiceConfig,
     "tokenPath" | "tokenBrokerSecret" | "webhookPath" | "features"
@@ -140,15 +146,33 @@ export function createServiceServer(options: {
   pipelineWorkspace?: string;
   notificationStore?: StateStore;
   mailStore?: MailStore;
-}): http.Server {
+  accountId?: string;
+  allowedAgents?: string[];
+  logger?: typeof log;
+}
+
+export function createServiceServer(options: ServerOptions, accounts?: readonly AccountContext[]): http.Server {
+  const routes = new Map<string, AccountContext>();
+  for (const account of accounts ?? []) {
+    const base = options.config.tokenPath.replace(/\/$/, "");
+    routes.set(`${base}/${account.accountId}`, account);
+    if (account.legacyTokenPath) routes.set(options.config.tokenPath, account);
+  }
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname === options.config.tokenPath) {
+    const broker = accounts ? routes.get(url.pathname) : url.pathname === options.config.tokenPath ? options : undefined;
+    if (broker) {
       await handleTokenRequest(req, res, {
-        tokenSource: options.tokenSource,
-        secret: options.config.tokenBrokerSecret,
-        features: options.config.features,
+        tokenSource: broker.tokenSource,
+        secret: broker.config.tokenBrokerSecret,
+        features: broker.config.features,
+        forbiddenStatus: accounts && url.pathname !== options.config.tokenPath ? 403 : undefined,
       });
+      return;
+    }
+    if (accounts && (url.pathname === options.config.tokenPath ||
+        url.pathname.startsWith(options.config.tokenPath.replace(/\/$/, "") + "/"))) {
+      json(res, 403, { error: "Forbidden" });
       return;
     }
     if (url.pathname !== options.config.webhookPath && url.pathname !== "/") {
@@ -162,37 +186,88 @@ export function createServiceServer(options: {
       res.end("Method not allowed");
       return;
     }
-    if (!options.graph
-      || !options.clientState
-      || !options.getPipelineRules
-      || !options.registry
-      || !options.notifyChannel
-      || !options.notifyTarget
-      || !options.pipelineWorkspace) {
+    if (!accounts && !options.graph) {
       res.writeHead(503);
       res.end("Webhook pipeline unavailable");
       return;
     }
-    const bodyPromise = readBody(req);
-    res.writeHead(202);
-    res.end();
-    try {
-      await handleNotification(await bodyPromise, {
-        graph: options.graph,
-        clientState: options.clientState,
-        pipelineRules: options.getPipelineRules(),
-        registry: options.registry,
-        runtimeConfig: options.runtimeConfig ?? {},
-        notifyChannel: options.notifyChannel,
-        notifyTarget: options.notifyTarget,
-        pipelineWorkspace: options.pipelineWorkspace,
-        notificationStore: options.notificationStore,
-        mailStore: options.mailStore,
-        trustedForwarders: options.getTrustedForwarders?.() ?? [],
-      });
-    } catch (error) {
-      log(`error handling webhook request: ${error}`);
+    if (!accounts) {
+      const bodyPromise = readBody(req);
+      res.writeHead(202).end();
+      try {
+        await runNotification(await bodyPromise, options);
+      } catch {
+        log("error handling webhook request");
+      }
+      return;
     }
+
+    let body: string;
+    try {
+      body = await readBody(req);
+    } catch {
+      res.writeHead(400).end();
+      return;
+    }
+    const subscriptions = new Map<string, AccountContext | undefined>();
+    for (const account of accounts) {
+      try {
+        const id = account.notificationStore?.load().subscriptionId;
+        if (id) subscriptions.set(id, subscriptions.has(id) ? undefined : account);
+      } catch {
+        account.logger?.("could not read current Graph subscription state");
+      }
+    }
+    const notifications = parseNotifications(body);
+    const deliveries = [];
+    let retry = false;
+    for (const notification of notifications) {
+      const id = notification.subscriptionId;
+      const account = typeof id === "string" ? subscriptions.get(id) : undefined;
+      if (!account) {
+        const authenticated = accounts.some(({ clientState }) =>
+          clientState !== undefined && clientStateMatches(notification.clientState, clientState));
+        if (authenticated) {
+          retry = true;
+          log("authenticated Graph notification has an unknown or ambiguous subscription; requesting retry");
+        } else {
+          log("ignored unauthenticated Graph notification with an unknown or ambiguous subscription");
+        }
+        continue;
+      }
+      deliveries.push({ notification, account });
+    }
+    // Graph retries authenticated batches while local subscription state catches
+    // up. Known deliveries proceed independently and use per-account deduplication.
+    res.writeHead(retry ? 503 : notifications.length ? 202 : 400).end();
+    await Promise.all(deliveries.map(async ({ notification, account }) => {
+      try {
+        await runNotification(JSON.stringify({ value: [notification] }), account);
+      } catch {
+        account.logger?.("failed to handle Graph notification");
+      }
+    }));
+  });
+}
+
+async function runNotification(body: string, options: ServerOptions): Promise<void> {
+  if (!options.graph || !options.clientState || !options.getPipelineRules || !options.registry
+      || !options.notifyChannel || !options.notifyTarget || !options.pipelineWorkspace) return;
+  await handleNotification(body, {
+    graph: options.graph,
+    clientState: options.clientState,
+    pipelineRules: options.getPipelineRules(),
+    registry: options.registry,
+    runtimeConfig: options.runtimeConfig ?? {},
+    notifyChannel: options.notifyChannel,
+    notifyTarget: options.notifyTarget,
+    pipelineWorkspace: options.pipelineWorkspace,
+    notificationStore: options.notificationStore,
+    mailStore: options.mailStore,
+    trustedForwarders: options.getTrustedForwarders?.() ?? [],
+    accountId: options.accountId,
+    allowedAgents: options.allowedAgents,
+    logger: options.logger,
   });
 }
 
@@ -202,8 +277,10 @@ export async function ensureSubscription(
   options: {
     webhookUrl: string;
     clientState: string;
+    logger?: typeof log;
   },
 ): Promise<void> {
+  const logger = options.logger ?? log;
   const state = store.load();
   const configurationMatches = state.notificationUrl === options.webhookUrl
     && state.clientState === options.clientState;
@@ -217,10 +294,10 @@ export async function ensureSubscription(
   };
 
   if (state.subscriptionId && (!state.expirationDateTime || !configurationMatches)) {
-    log("stored Graph subscription configuration changed; replacing subscription");
+    logger("stored Graph subscription configuration changed; replacing subscription");
     try {
       await graph.deleteSubscription(state.subscriptionId);
-      log("stale Graph subscription removed");
+      logger("stale Graph subscription removed");
     } catch (error) {
       throw new Error(`could not remove stale Graph subscription; refusing replacement: ${error}`);
     }
@@ -228,7 +305,7 @@ export async function ensureSubscription(
   } else if (state.subscriptionId && state.expirationDateTime) {
     const remaining = new Date(state.expirationDateTime).getTime() - Date.now();
     if (remaining > RENEWAL_THRESHOLD_MS) {
-      log(`existing Graph subscription remains valid for ${Math.round(remaining / 3_600_000)}h`);
+      logger(`existing Graph subscription remains valid for ${Math.round(remaining / 3_600_000)}h`);
       return;
     }
     if (remaining > 0) {
@@ -241,10 +318,10 @@ export async function ensureSubscription(
           notificationUrl: options.webhookUrl,
           clientState: options.clientState,
         });
-        log(`Graph subscription renewed through ${renewed.expirationDateTime}`);
+        logger(`Graph subscription renewed through ${renewed.expirationDateTime}`);
         return;
       } catch (error) {
-        log(`Graph subscription renewal failed; removing old subscription before replacement: ${error}`);
+        logger(`Graph subscription renewal failed; removing old subscription before replacement: ${error}`);
         await graph.deleteSubscription(state.subscriptionId);
         clearSubscription();
       }
@@ -266,11 +343,35 @@ export async function ensureSubscription(
     notificationUrl: options.webhookUrl,
     clientState: options.clientState,
   });
-  log(`Graph subscription active through ${subscription.expirationDateTime}`);
+  logger(`Graph subscription active through ${subscription.expirationDateTime}`);
 }
 
-export async function main(): Promise<void> {
-  const config = loadServiceConfig();
+export interface AccountContext extends ServerOptions {
+  legacyTokenPath?: boolean;
+  checkSubscription(): Promise<void>;
+  stopWatching(): void;
+}
+
+export function validateAgentRoutes(runtime: RuntimeConfig, allowlist: readonly string[]): RuntimeConfig {
+  const check = (agent: unknown, session?: unknown): void => {
+    if (typeof agent !== "string" || !allowlist.includes(agent) ||
+        (session !== undefined && (typeof session !== "string" || !session.startsWith(`agent:${agent}:`)))) {
+      throw new Error("Mail rules point outside the account agent allowlist");
+    }
+  };
+  for (const rule of runtime.mail_rules ?? []) {
+    for (const action of rule.actions) {
+      const [name, params] = normalizeAction(action);
+      if (name === "prompt_email") check(params.agent ?? "main", params.session);
+    }
+  }
+  const decisions = runtime.decisions as { agent?: string } | undefined;
+  if (decisions) check(decisions.agent ?? "main");
+  return runtime;
+}
+
+async function createAccountContext(config: ServiceConfig): Promise<AccountContext> {
+  const logger = config.logger ?? log;
   const store = new StateStore(config.statePath);
   const state = store.load();
   const refreshToken = state.refreshToken || config.initialRefreshToken;
@@ -291,9 +392,19 @@ export async function main(): Promise<void> {
     },
   });
   const graph = new GraphClient(tokens);
-  const runtimeConfig = loadRuntimeConfig(config.runtimeConfigPath);
+  const readRules = () => {
+    const runtime = loadRuntimeConfig(config.runtimeConfigPath, logger);
+    return config.accountId ? validateAgentRoutes(runtime, config.allowedAgents ?? []) : runtime;
+  };
+  let runtimeConfig: RuntimeConfig;
+  try {
+    runtimeConfig = readRules();
+  } catch {
+    logger("Refused runtime configuration outside the account allowlist; starting with empty rules");
+    runtimeConfig = {};
+  }
   const pipelineRules = buildPipelineRules(runtimeConfig);
-  const trustedForwarders = buildTrustedForwarders(runtimeConfig);
+  const trustedForwarders = buildTrustedForwarders(runtimeConfig, logger);
   const registry = new ActionRegistry();
   registerBuiltinActions(registry, { mailboxPrefixResolver: () => "📬" });
 
@@ -301,27 +412,34 @@ export async function main(): Promise<void> {
     try {
       const plugin = await import(pluginPath) as ActionPlugin;
       if (typeof plugin.register !== "function") {
-        log(`action plugin ${pluginPath} does not export register(); skipping`);
+        logger(`action plugin ${pluginPath} does not export register(); skipping`);
         continue;
       }
       await plugin.register(registry);
-      log(`loaded action plugin: ${pluginPath}`);
+      logger(`loaded action plugin: ${pluginPath}`);
     } catch (error) {
-      log(`failed to load action plugin ${pluginPath}: ${error}`);
+      logger(`failed to load action plugin ${pluginPath}: ${error}`);
     }
   }
 
   let watcher: FSWatcher | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   try {
-    watcher = watch(config.runtimeConfigPath, () => {
+    watcher = watch(dirname(config.runtimeConfigPath), (_event, filename) => {
+      if (filename && filename !== basename(config.runtimeConfigPath)) return;
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        const reloaded = loadRuntimeConfig(config.runtimeConfigPath);
+        let reloaded: RuntimeConfig;
+        try {
+          reloaded = readRules();
+        } catch {
+          logger("Refused runtime configuration outside the account allowlist");
+          return;
+        }
         const updated = buildPipelineRules(reloaded);
         pipelineRules.splice(0, pipelineRules.length, ...updated);
-        trustedForwarders.splice(0, trustedForwarders.length, ...buildTrustedForwarders(reloaded));
-        log(
+        trustedForwarders.splice(0, trustedForwarders.length, ...buildTrustedForwarders(reloaded, logger));
+        logger(
           `runtime config reloaded: ${updated.length} mail rule(s), `
             + `${trustedForwarders.length} trusted forwarder(s)`,
         );
@@ -333,10 +451,15 @@ export async function main(): Promise<void> {
 
   const mailStore = new MailStore(config.mailStorePath);
   if (mailStore.enabled) {
-    log(`mail store enabled at ${config.mailStorePath} (${mailStore.count()} messages)`);
+    logger(`mail store enabled at ${config.mailStorePath} (${mailStore.count()} messages)`);
   }
 
-  const server = createServiceServer({
+  let checking: Promise<void> | undefined;
+  return Object.freeze({
+    accountId: config.accountId,
+    legacyTokenPath: config.legacyTokenPath,
+    logger,
+    allowedAgents: config.accountId ? config.allowedAgents ?? [] : undefined,
     config,
     tokenSource: tokens,
     graph,
@@ -350,45 +473,52 @@ export async function main(): Promise<void> {
     pipelineWorkspace: config.pipelineWorkspace,
     notificationStore: store,
     mailStore,
+    checkSubscription() {
+      checking ??= ensureSubscription(graph, store, {
+        webhookUrl: config.webhookUrl,
+        clientState: config.webhookClientState,
+        logger,
+      }).catch((error) => logger(`Graph subscription check failed: ${error}`))
+        .finally(() => { checking = undefined; });
+      return checking;
+    },
+    stopWatching() {
+      if (debounce) clearTimeout(debounce);
+      watcher?.close();
+    },
   });
-  await new Promise<void>((resolve) => {
+}
+
+export async function main(): Promise<void> {
+  const { accounts: configs } = loadServiceConfig();
+  const config = configs[0]!;
+  const accounts = await Promise.all(configs.map(createAccountContext));
+  const primary = accounts[0]!;
+  const server = createServiceServer(primary, config.accountId ? accounts : undefined);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
     server.listen(config.port, config.bind, () => {
+      server.off("error", reject);
       log(`listening on ${config.bind}:${config.port}`);
-      log(`token broker path: ${config.tokenPath}`);
-      log(`Graph webhook URL: ${config.webhookUrl}`);
       resolve();
     });
   });
 
-  try {
-    await ensureSubscription(graph, store, {
-      webhookUrl: config.webhookUrl,
-      clientState: config.webhookClientState,
-    });
-  } catch (error) {
-    log(`initial Graph subscription check failed: ${error}`);
-  }
-  const renewal = setInterval(() => {
-    void ensureSubscription(graph, store, {
-      webhookUrl: config.webhookUrl,
-      clientState: config.webhookClientState,
-    }).catch((error) => log(`Graph subscription check failed: ${error}`));
-  }, RENEWAL_CHECK_INTERVAL_MS);
-
+  const check = () => Promise.all(accounts.map((account) => account.checkSubscription()));
+  const renewal = setInterval(() => void check(), RENEWAL_CHECK_INTERVAL_MS);
   const shutdown = (signal: string): void => {
-    log(`${signal} received; preserving Graph subscription and shutting down`);
+    log(`${signal} received; preserving Graph subscriptions and shutting down`);
     clearInterval(renewal);
-    if (debounce) clearTimeout(debounce);
-    watcher?.close();
+    for (const account of accounts) account.stopWatching();
     server.close(() => {
-      log("server closed");
-      mailStore.close();
+      for (const account of accounts) account.mailStore?.close();
       process.exit(0);
     });
     setTimeout(() => process.exit(0), 5_000).unref();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
+  await check();
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

@@ -1048,8 +1048,14 @@ export async function saveAttachments(
         await link(stagedFile, file);
         saved.push(file);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        skippedExisting.push(name);
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EEXIST") {
+          skippedExisting.push(name);
+        } else if (code && ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EPERM"].includes(code)) {
+          throw new Error("attachmentSaveDirectory must allow hard links. Choose a supported local filesystem or check its permissions.");
+        } else {
+          throw error;
+        }
       }
       await unlink(stagedFile);
     }

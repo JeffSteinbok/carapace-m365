@@ -310,25 +310,48 @@ describe("Outlook attachment storage", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("saves new files without overwriting a file or following a destination symlink", async () => {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    writeFileSync(resolve(directory, "existing.png"), "existing");
-    writeFileSync(resolve(scratch, "target.png"), "target");
-    symlinkSync(resolve(scratch, "target.png"), resolve(directory, "linked.png"));
-    const attachments = { value: ["existing.png", "linked.png", "fresh.png"].map(name => ({
+  function attachmentResponse(names: string[]) {
+    return JSON.stringify({ value: names.map(name => ({
       name,
       contentType: "image/png",
       contentBytes: Buffer.from("new attachment").toString("base64"),
-    })) };
-    mockHttpsSeq([TOKEN, 200], [JSON.stringify(attachments), 200]);
+    })) });
+  }
+
+  it("saves new files without overwriting existing files", async () => {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(resolve(directory, "existing.png"), "existing");
+    mockHttpsSeq([TOKEN, 200], [attachmentResponse(["existing.png", "fresh.png"]), 200]);
     const { tools } = await loadPlugin({ attachmentSaveDirectory: directory });
     const result = text(await tools.outlook_save_attachments(family).execute("id", { message_id: "msg1" }));
 
     expect(result.count).toBe(1);
-    expect(result.skipped_existing).toEqual(["existing.png", "linked.png"]);
+    expect(result.skipped_existing).toEqual(["existing.png"]);
     expect(readFileSync(resolve(directory, "existing.png"), "utf8")).toBe("existing");
-    expect(readFileSync(resolve(scratch, "target.png"), "utf8")).toBe("target");
     expect(readFileSync(resolve(directory, "fresh.png"), "utf8")).toBe("new attachment");
-    expect(readdirSync(directory).sort()).toEqual(["existing.png", "fresh.png", "linked.png"]);
+    expect(readdirSync(directory).sort()).toEqual(["existing.png", "fresh.png"]);
+  });
+
+  it("skips a destination symlink without writing to its target", async (ctx) => {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const target = resolve(scratch, "target.png");
+    writeFileSync(target, "target");
+    try {
+      symlinkSync(target, resolve(directory, "linked.png"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "ENOSYS" || code === "ENOTSUP") {
+        ctx.skip("The test filesystem does not permit creating symlinks");
+        return;
+      }
+      throw error;
+    }
+    mockHttpsSeq([TOKEN, 200], [attachmentResponse(["linked.png"]), 200]);
+    const { tools } = await loadPlugin({ attachmentSaveDirectory: directory });
+    const result = text(await tools.outlook_save_attachments(family).execute("id", { message_id: "msg1" }));
+
+    expect(result.count).toBe(0);
+    expect(result.skipped_existing).toEqual(["linked.png"]);
+    expect(readFileSync(target, "utf8")).toBe("target");
   });
 });

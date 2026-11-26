@@ -1026,10 +1026,10 @@ export function createEntry(): PluginEntry {
 // ---------------------------------------------------------------------------
 
 function requireCalendarDeletion(
-  config: { allowCalendarDeletion?: boolean },
+  config: { allowCalendarDeletion?: boolean | string },
   params: { event_id: string; confirm_event_id?: string },
 ): void {
-  if (config.allowCalendarDeletion !== true) {
+  if (config.allowCalendarDeletion !== true && config.allowCalendarDeletion !== "true") {
     throw new Error("Calendar deletion and cancellation are disabled for this account");
   }
   if (params.confirm_event_id !== params.event_id) {
@@ -1115,7 +1115,7 @@ export function resolveConfig(config: {
     tokenBrokerSecret: brokerSecret,
     features: configuredFeatures(config),
     oneDriveDeniedPaths: config.oneDriveDeniedPaths,
-    attachmentSaveDirectory: config.attachmentSaveDirectory?.trim(),
+    attachmentSaveDirectory: config.attachmentSaveDirectory,
     maskPrivateFamilyEvents: config.maskPrivateFamilyEvents,
     personalCalendarNames: parseNames(
       config.personalCalendarNames,

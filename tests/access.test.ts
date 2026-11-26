@@ -262,6 +262,18 @@ describe("calendar deletion safeguards", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("parses the standalone CLI's explicit true opt-in", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], ["", 204]);
+    const disabled = await loadPlugin({ allowCalendarDeletion: "false" });
+    const denied = text(await disabled.tools.outlook_delete_event(family).execute("id", args));
+    expect(denied.error).toContain("disabled for this account");
+    expect(spy).not.toHaveBeenCalled();
+
+    const enabled = await loadPlugin({ allowCalendarDeletion: "true" });
+    const result = text(await enabled.tools.outlook_delete_event(family).execute("id", args));
+    expect(result.success).toBe(true);
+  });
+
   it("requires the exact confirmation and a single event ID", async () => {
     const spy = mockHttpsSeq();
     const { tools } = await loadPlugin({ allowCalendarDeletion: true });

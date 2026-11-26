@@ -1009,7 +1009,7 @@ export async function saveAttachments(
   if (!configuredDir || !isAbsolute(configuredDir)) {
     return { error: "Set attachmentSaveDirectory to a dedicated absolute directory before saving attachments" };
   }
-  if (params.output_dir !== undefined && params.output_dir.trim() !== configuredDir) {
+  if (params.output_dir !== undefined && params.output_dir !== configuredDir) {
     return { error: "output_dir must match attachmentSaveDirectory" };
   }
   const destination = await realpath(configuredDir);

@@ -14,6 +14,7 @@ import {
   type ToolCallContext,
 } from "carapace-plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import packageJson from "../package.json" with { type: "json" };
 import {
   DEFAULT_TOKEN_BROKER_URL,
   isM365FeatureEnabled,
@@ -86,7 +87,7 @@ const accountSchema = Type.Object({
 const createBaseEntry = definePlugin({
   id: "m365",
   name: "Microsoft 365",
-  description: "Outlook mail, calendar, tasks, and OneDrive tools via Microsoft Graph",
+  description: packageJson.description,
 
   configSchema: Type.Object({
     accounts: Type.Optional(Type.Record(Type.String(), accountSchema)),

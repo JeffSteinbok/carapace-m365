@@ -1,5 +1,7 @@
 # 🐚 📧 📅 ✅ 📁 Carapace Microsoft 365
 
+[![npm](https://img.shields.io/npm/v/carapace-m365?style=flat&logo=npm)](https://www.npmjs.com/package/carapace-m365) [![ClawHub](https://img.shields.io/badge/ClawHub-catalog-blue?style=flat)](https://clawhub.ai/jeffsteinbok/plugins/carapace-m365) [![CI](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/ci.yml) [![Release](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/release.yml) [![Publish](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/JeffSteinbok/carapace-m365/actions/workflows/publish.yml)
+
 Microsoft 365 tools for Outlook mail, calendars, Microsoft To Do, and OneDrive
 through Microsoft Graph.
 

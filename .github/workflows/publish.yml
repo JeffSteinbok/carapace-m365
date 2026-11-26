@@ -1,20 +1,34 @@
-name: Publish to npm
+name: Publish package
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Release tag already published to npm through this workflow (for example, v1.5.1)
+        required: true
+        type: string
 
 permissions:
   contents: read
-  id-token: write
+
+env:
+  RELEASE_TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9A-Za-z-]+)*)?$'
 
 jobs:
-  publish:
+  npm:
+    if: github.event_name == 'release'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@v6
@@ -23,13 +37,10 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - run: npm ci
-      - run: npm run build
-
-      - name: Publish package
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - name: Validate release tag and choose channel
+        id: package
         run: |
+          test "$RELEASE_TAG" && [[ "$RELEASE_TAG" =~ $RELEASE_TAG_PATTERN ]]
           version="$(node -p "require('./package.json').version")"
           test "$RELEASE_TAG" = "v$version"
           channel=latest
@@ -39,4 +50,76 @@ jobs:
             *-rc|*-rc.*) channel=rc ;;
             *-*) echo "Unsupported prerelease channel" >&2; exit 1 ;;
           esac
-          npm publish --access public --tag "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Publish to npm
+        env:
+          CHANNEL: ${{ steps.package.outputs.channel }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          test "$commit" = "$GITHUB_SHA"
+          npm publish --access public --tag "$CHANNEL"
+
+  # ClawHub accepts trusted-publisher OIDC claims from workflow_dispatch.
+  clawhub:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Publish the npm release to ClawHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ $RELEASE_TAG_PATTERN ]]; then
+            echo "Expected a stable release tag or an alpha, beta, or rc tag." >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          channel=latest
+          if [[ "$version" == *-* ]]; then
+            channel="${version#*-}"
+            channel="${channel%%.*}"
+          fi
+
+          draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          test "$draft" = false
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          archive="$(npm pack "carapace-m365@$version" --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
+          digest="$(sha512sum "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)"
+          repository="https://github.com/$GITHUB_REPOSITORY"
+          ref="refs/tags/$RELEASE_TAG"
+          bundle="$RUNNER_TEMP/carapace-m365-provenance.json"
+          curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/carapace-m365@$version" |
+            jq -e '.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1") | .bundle' > "$bundle"
+          npm exec --yes --package=@sigstore/cli@0.11.0 -- sigstore verify "$bundle" \
+            --certificate-identity-uri "$repository/.github/workflows/publish.yml@$ref" \
+            --certificate-issuer "https://token.actions.githubusercontent.com"
+          jq -e --arg repo "$repository" --arg ref "$ref" --arg sha "$commit" \
+            --arg digest "$digest" --arg subject "pkg:npm/carapace-m365@$version" '
+              .dsseEnvelope.payload | @base64d | fromjson |
+              any(.subject[]; .name == $subject and .digest.sha512 == $digest)
+              and any(.predicate.buildDefinition.resolvedDependencies[];
+                .uri == ("git+" + $repo + "@" + $ref) and .digest.gitCommit == $sha)
+            ' "$bundle" >/dev/null
+
+          npm install --global --ignore-scripts clawhub@0.27.0
+          clawhub package publish "$RUNNER_TEMP/$archive" \
+            --source-repo "$GITHUB_REPOSITORY" \
+            --source-commit "$commit" \
+            --source-ref "$RELEASE_TAG" \
+            --tags "$channel" \
+            --wait

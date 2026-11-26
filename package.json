@@ -21,14 +21,16 @@
   "scripts": {
     "build": "npm run typecheck && npm run build:auth && npm run build:plugin && npm run build:webhook",
     "build:auth": "npm run build --workspace @carapace/m365-graph-auth",
-    "build:plugin": "tsup && carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin && npm run check:manifest",
+    "build:plugin": "tsup && npm run generate:plugin && npm run check:manifest",
+    "generate:plugin": "carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin",
     "check:manifest": "node -e \"require('node:assert/strict').strictEqual(require('./openclaw.plugin.json').version, require('./package.json').version)\"",
     "build:webhook": "npm run build --workspace @carapace/m365-webhook",
     "login": "node scripts/login.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p services/m365-webhook/tsconfig.json",
     "deploy": "node scripts/deploy.mjs",
-    "prepack": "npm run check:manifest && node scripts/prepare-package.mjs"
+    "prepack": "npm run --silent check:manifest && node scripts/prepare-package.mjs",
+    "postpack": "node scripts/prepare-package.mjs --restore"
   },
   "devDependencies": {
     "@carapace/m365-graph-auth": "1.0.0",

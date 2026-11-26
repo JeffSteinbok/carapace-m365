@@ -84,15 +84,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ ! "$RELEASE_TAG" =~ $RELEASE_TAG_PATTERN ]]; then
-            echo "Expected a stable release tag or an alpha, beta, or rc tag." >&2
+          set -eo pipefail
+          fail() {
+            echo "::error::$1"
             exit 1
-          fi
+          }
+
+          [[ "$RELEASE_TAG" =~ $RELEASE_TAG_PATTERN ]] ||
+            fail "Expected a stable release tag or an alpha, beta, or rc tag."
           ref="refs/tags/$RELEASE_TAG"
-          if [[ "$GITHUB_REF" != "$ref" ]]; then
-            echo "Dispatch this workflow from the same release tag supplied as release-tag." >&2
-            exit 1
-          fi
+          [[ "$GITHUB_REF" == "$ref" ]] ||
+            fail "Dispatch this workflow from the same release tag supplied as release-tag."
           version="${RELEASE_TAG#v}"
           channel=latest
           if [[ "$version" == *-* ]]; then
@@ -100,30 +102,43 @@ jobs:
             channel="${channel%%.*}"
           fi
 
-          draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
-          test "$draft" = false
-          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
-          archive="$(npm pack "carapace-m365@$version" --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
-          digest="$(sha512sum "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)"
+          draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" ||
+            fail "Could not look up GitHub release $RELEASE_TAG."
+          [[ "$draft" == false ]] || fail "GitHub release $RELEASE_TAG must be published."
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)" ||
+            fail "Could not resolve GitHub tag $ref."
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "GitHub tag $ref did not resolve to a commit SHA."
+
+          # Avoid a cached 404 from a request made before the npm release propagated.
+          request="run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT"
+          archive="$RUNNER_TEMP/carapace-m365-$version.tgz"
+          curl -fsSL "https://registry.npmjs.org/carapace-m365/-/carapace-m365-$version.tgz?$request" -o "$archive" ||
+            fail "Could not download npm tarball for carapace-m365@$version."
+          digest="$(sha512sum "$archive" | cut -d ' ' -f 1)" ||
+            fail "Could not compute the npm tarball SHA-512 digest."
           repository="https://github.com/$GITHUB_REPOSITORY"
           bundle="$RUNNER_TEMP/carapace-m365-provenance.json"
-          curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/carapace-m365@$version" |
-            jq -e '.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1") | .bundle' > "$bundle"
+          curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/carapace-m365@$version?$request" |
+            jq -e '.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1") | .bundle' > "$bundle" ||
+            fail "Could not fetch or extract npm SLSA provenance for carapace-m365@$version."
           npm exec --yes --package=@sigstore/cli@0.11.0 -- sigstore verify "$bundle" \
             --certificate-identity-uri "$repository/.github/workflows/publish.yml@$ref" \
-            --certificate-issuer "https://token.actions.githubusercontent.com"
+            --certificate-issuer "https://token.actions.githubusercontent.com" ||
+            fail "Could not verify the npm provenance signature and workflow identity."
           jq -e --arg repo "$repository" --arg ref "$ref" --arg sha "$commit" \
             --arg digest "$digest" --arg subject "pkg:npm/carapace-m365@$version" '
               .dsseEnvelope.payload | @base64d | fromjson |
               any(.subject[]; .name == $subject and .digest.sha512 == $digest)
               and any(.predicate.buildDefinition.resolvedDependencies[];
                 .uri == ("git+" + $repo + "@" + $ref) and .digest.gitCommit == $sha)
-            ' "$bundle" >/dev/null
+            ' "$bundle" >/dev/null ||
+            fail "npm provenance does not match the tarball digest, release tag, and commit."
 
-          npm install --global --ignore-scripts clawhub@0.27.0
-          clawhub package publish "$RUNNER_TEMP/$archive" \
+          npm install --global --ignore-scripts clawhub@0.27.0 ||
+            fail "Could not install the pinned ClawHub CLI."
+          clawhub package publish "$archive" \
             --source-repo "$GITHUB_REPOSITORY" \
             --source-commit "$commit" \
             --source-ref "$ref" \
             --tags "$channel" \
-            --wait
+            --wait || fail "ClawHub rejected the publish request or did not finish processing it."

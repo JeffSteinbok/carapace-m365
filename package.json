@@ -27,7 +27,8 @@
     "login": "node scripts/login.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p services/m365-webhook/tsconfig.json",
-    "deploy": "node scripts/deploy.mjs"
+    "deploy": "node scripts/deploy.mjs",
+    "prepack": "npm run check:manifest && node scripts/prepare-package.mjs"
   },
   "devDependencies": {
     "@carapace/m365-graph-auth": "1.0.0",

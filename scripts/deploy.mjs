@@ -28,7 +28,7 @@ const { id } = JSON.parse(readFileSync(resolve(root, "openclaw.plugin.json"), "u
 const outDir = resolve(root, "out");
 mkdirSync(outDir, { recursive: true });
 const [packed] = JSON.parse(
-  execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", outDir], {
+  execFileSync("npm", ["pack", "--json", "--foreground-scripts=false", "--ignore-scripts=false", "--pack-destination", outDir], {
     cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],

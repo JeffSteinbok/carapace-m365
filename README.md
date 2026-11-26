@@ -441,3 +441,31 @@ The pack contains only the plugin (`dist/` with the shared auth package
 bundled in). The token broker/webhook service (`services/m365-webhook`) and
 `npm run login` are separate and keep running from this checkout; the
 plugin reaches the broker over HTTP via `tokenBrokerUrl`.
+
+## Multiple broker accounts
+
+Set `M365_ACCOUNTS_PATH` for the webhook service to a JSON file with an
+`accounts` object keyed by account ID. Each account specifies `statePath`,
+`rulesPath`, `pipelineWorkspace`, `logPath`, `features`,
+`brokerSecretEnv`, `clientStateEnv` and `notify: { channel, target }`.
+An optional `mailStorePath` enables an account-specific SQLite store.
+Use distinct paths, secrets and client states. The file references credentials
+by environment variable name. Keep refresh tokens in the individual state files.
+
+The broker serves `POST /token/<account-id>`. Set `legacyTokenPath: true` on
+one account during migration to preserve its previous endpoint, state and
+subscription. All accounts use the same webhook URL. The service routes
+notifications by subscription ID and validates the matched account's client
+state. An unknown subscription requests a retry only when its client state
+matches a configured account. Each account requires an `allowedAgents` array that limits its rule file's agent and decision routes.
+
+In plugin config, use `accounts.<account-id>` with `agents`,
+`tokenBrokerUrl`, `tokenBrokerSecret`, `features` and optional calendar
+names and access rules. OpenClaw's agent context selects the account. Mapped
+agents use that broker exclusively. Use `defaultAgents` to explicitly assign agents to the default account. The plugin refuses unassigned agents when account assignments are configured.
+The local mail store and meeting invitation tools are unavailable to mapped agents.
+
+For remote sign-in, use `npm run login -- --device-code --token-file <new-private-path>`
+with the account's scopes. Enable public client flows in the app registration
+first. The command shows the verification code and saves the refresh token to
+the new file with private permissions.

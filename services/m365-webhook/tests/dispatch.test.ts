@@ -64,12 +64,23 @@ describe("m365 webhook command dispatch", () => {
   it("routes rule handoffs to the configured notify channel", () => {
     dispatchResults(
       [{ kind: "agent_handoff", payload: { agent: "mail-reader", message: "summarize" } }],
-      { channel: "imessage", target: "owner@example.com" },
+      { channel: "imessage", target: "owner@example.com", allowedAgents: undefined },
     );
 
     const args = execFile.mock.calls[0]?.[1] as string[];
     expect(args).toContain("mail-reader");
     expect(args).toContain("--reply-to");
     expect(args).toContain("owner@example.com");
+  });
+  it("refuses cross-account agents and session overrides at dispatch", () => {
+    const logger = vi.fn();
+    dispatchResults([
+      { kind: "agent_handoff", payload: { agent: "main", message: "wrong agent" } },
+      { kind: "agent_handoff", payload: { agent: "reader", session: "agent:main:mail", message: "wrong session" } },
+      { kind: "agent_handoff", payload: { agent: "reader", session: "agent:reader:mail", message: "allowed" } },
+    ], { channel: "imessage", target: "recipient", allowedAgents: ["reader"], logger });
+    expect(execFile).toHaveBeenCalledOnce();
+    expect(execFile.mock.calls[0]?.[1]).toContain("allowed");
+    expect(logger.mock.calls.filter(([message]) => message.includes("outside the account allowlist"))).toHaveLength(2);
   });
 });

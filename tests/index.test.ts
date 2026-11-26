@@ -626,6 +626,38 @@ describe("outlook_query_events", () => {
   // A date range must use calendarView, not /me/events: calendarView expands
   // recurring series into occurrences and returns events overlapping the
   // window, so all-day and multi-day events are not dropped.
+  it("returns busy intervals for private or unclassified shared family events", async () => {
+    const { resolveConfig } = await import("../src/index.js");
+    const { queryEvents } = await import("../src/handlers.js");
+    const [seed] = JSON.parse(EVENTS).value;
+    const rows = [
+      { ...seed, sensitivity: "private", id: "private-id", subject: "hidden title" },
+      { ...seed, id: "unknown-id", subject: "unknown title", CLASS: "PUBLIC" },
+      { ...seed, sensitivity: "normal", id: "normal-id", subject: "normal title" },
+    ];
+    mockHttpsSeq([TOKEN, 200], [JSON.stringify({ value: [{ name: "Your Family", id: "family-id" }] }), 200],
+      [JSON.stringify({ value: rows }), 200]);
+    const data = await queryEvents(resolveConfig({ maskPrivateFamilyEvents: true }), {
+      calendar: "family", after: "2026-05-03", before: "2026-05-03",
+    }) as { events: Array<Record<string, unknown>> };
+    expect(data.events.slice(0, 2)).toEqual(Array.from({length:2}, () => ({
+      subject: "busy (private)", start: expect.any(String), end: expect.any(String), show_as: "busy",
+    })));
+    expect(data.events[2]).toMatchObject({ id: "normal-id", subject: "normal title" });
+  });
+
+  it("passes the Graph privacy marker through date-based event queries", async () => {
+    const fixture = JSON.parse(EVENTS);
+    fixture.value[0].sensitivity = "private";
+    const httpsRequest = mockHttpsSeq([TOKEN, 200], [JSON.stringify(fixture), 200]);
+    const { api } = await loadPlugin();
+    const result = resultText(await api.tools["outlook_query_events"].execute("id", {
+      after: "2026-05-03", before: "2026-05-03",
+    }));
+    expect(decodeURIComponent(String(httpsRequest.mock.calls.at(-1)?.[0]))).toContain("body,sensitivity");
+    expect(result).toMatchObject({ events: [{ sensitivity: "private" }] });
+  });
+
   it("queries a date range via calendarView with an inclusive end day", async () => {
     const spy = mockHttpsSeq([TOKEN, 200], [EVENTS, 200]);
     const { api } = await loadPlugin();

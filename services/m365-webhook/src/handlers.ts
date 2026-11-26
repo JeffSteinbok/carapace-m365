@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   ActionRegistry,
@@ -11,7 +12,8 @@ import { MailStore } from "@carapace/m365-mail-store";
 import { OutlookProviderClient } from "./provider.js";
 import { StateStore } from "./state.js";
 
-interface GraphNotificationValue {
+export interface GraphNotificationValue {
+  subscriptionId?: string;
   clientState?: string;
   resourceData?: { id?: string };
 }
@@ -141,11 +143,21 @@ export function handleValidation(
   return true;
 }
 
+export function clientStateMatches(value: unknown, expected: string): boolean {
+  if (typeof value !== "string" || !expected) return false;
+  const provided = Buffer.from(value);
+  const wanted = Buffer.from(expected);
+  return provided.length === wanted.length && timingSafeEqual(provided, wanted);
+}
+
 export async function handleNotification(
   body: string,
   options: {
     graph: GraphClient;
     clientState: string;
+    accountId?: string;
+    logger?: typeof log;
+    allowedAgents?: string[];
     pipelineRules: MailRule[];
     registry: ActionRegistry;
     runtimeConfig: Record<string, unknown>;
@@ -157,38 +169,28 @@ export async function handleNotification(
     trustedForwarders?: TrustedForwarder[];
   },
 ): Promise<void> {
-  let parsed: GraphNotificationBody;
-  try {
-    parsed = JSON.parse(body) as GraphNotificationBody;
-  } catch {
-    log("invalid JSON in Graph notification body");
-    return;
-  }
-  const notifications = parsed.value ?? [];
-  if (!notifications.length) {
-    log("received empty notification batch");
-    return;
-  }
-
-  const provider = new OutlookProviderClient(options.graph, log);
+  const logger = options.logger ?? log;
+  const notifications = parseNotifications(body, logger);
+  const provider = new OutlookProviderClient(options.graph, logger);
   for (const notification of notifications) {
-    if (notification.clientState !== options.clientState) {
-      log("rejected Graph notification with invalid clientState");
+    if (!clientStateMatches(notification.clientState, options.clientState)) {
+      logger("rejected Graph notification with invalid clientState");
       continue;
     }
     const messageId = notification.resourceData?.id;
     if (!messageId) {
-      log("Graph notification did not include resourceData.id");
+      logger("Graph notification did not include resourceData.id");
       continue;
     }
     if (options.notificationStore && !options.notificationStore.claimNotification(messageId)) {
-      log(`skipping duplicate Graph notification for message ${messageId}`);
+      logger(`skipping duplicate Graph notification for message ${messageId}`);
       continue;
     }
     try {
       const message = await options.graph.fetchMessage(messageId);
       const envelope = messageToEnvelope(message, options.trustedForwarders);
-      log(`received: "${envelope.subject}" from ${envelope.sender_email}`);
+      if (options.accountId) envelope.account_id = options.accountId;
+      logger(`received: "${envelope.subject}" from ${envelope.sender_email}`);
 
       if (options.mailStore?.enabled) {
         const internetMessageId = message.internetMessageHeaders
@@ -206,7 +208,7 @@ export async function handleNotification(
           raw_json: JSON.stringify(message),
           stored_at: new Date().toISOString(),
         });
-        log(`mail-store: stored message ${message.id}`);
+        logger(`mail-store: stored message ${message.id}`);
       }
 
       const [, results] = await executeRules(
@@ -216,18 +218,20 @@ export async function handleNotification(
         provider,
         {
           workspace: options.pipelineWorkspace,
-          logger: log,
+          logger,
           config: options.runtimeConfig,
         },
       );
       dispatchResults(results, {
         channel: options.notifyChannel,
         target: options.notifyTarget,
+        logger,
+        allowedAgents: options.allowedAgents,
       });
       options.notificationStore?.completeNotification(messageId);
     } catch (error) {
       options.notificationStore?.releaseNotification(messageId);
-      log(`error processing message ${messageId}: ${error}`);
+      logger(`error processing message ${messageId}: ${error}`);
     }
   }
 }
@@ -248,4 +252,18 @@ export function readBody(
     req.on("end", () => resolve(data));
     req.on("error", reject);
   });
+}
+
+export function parseNotifications(body: string, logger = log): GraphNotificationValue[] {
+  try {
+    const parsed = JSON.parse(body) as GraphNotificationBody | null;
+    if (Array.isArray(parsed?.value)) {
+      return parsed.value.filter((notification) => notification && typeof notification === "object");
+    }
+  } catch {
+    logger("invalid JSON in Graph notification body");
+    return [];
+  }
+  logger("received empty notification batch");
+  return [];
 }

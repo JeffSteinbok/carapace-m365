@@ -216,3 +216,37 @@ describe("writes", () => {
     expect(data.error).toContain("could not determine the calendar");
   });
 });
+
+describe("mapped broker accounts", () => {
+  it("requires trusted identity and refuses disabled or shared-account routes before Graph", async () => {
+    const request = vi.spyOn(https, "request");
+    const { tools } = await loadPlugin({
+      tokenBrokerUrl: "http://127.0.0.1:18790/token",
+      tokenBrokerSecret: "legacy",
+      features: ["mail-write", "mail-send", "onedrive-read"],
+      defaultAgents: ["main"],
+      accounts: {
+        second: {
+          agents: ["second"],
+          tokenBrokerUrl: "http://127.0.0.1:18790/token/second",
+          tokenBrokerSecret: "separate",
+          features: ["mail-write"],
+        },
+        invalid: {
+          agents: ["invalid"],
+          tokenBrokerUrl: "http://127.0.0.1:18790/token/invalid",
+          tokenBrokerSecret: "legacy",
+          features: ["mail-write"],
+        },
+      },
+    });
+    expect(text(await tools.outlook_inbox!.execute("1", {})).error).toMatch(/authenticated agent/);
+    expect(text(await tools.outlook_send!({ agentId: "second" }).execute("1", {})).error).toMatch(/unavailable/);
+    expect(text(await tools.onedrive_list!({ agentId: "second" }).execute("1", {})).error).toMatch(/unavailable/);
+    expect(text(await tools.outlook_search_store!({ agentId: "second" }).execute("1", {})).error).toMatch(/unavailable/);
+    expect(text(await tools.outlook_inbox!({ agentId: "invalid" }).execute("1", {})).error).toMatch(/shares default/);
+    expect(text(await tools.outlook_inbox!({ agentId: "unmapped" }).execute("1", {})).error).toMatch(/no Microsoft 365 account assignment/);
+    expect(text(await tools.outlook_search_store!({ agentId: "main" }).execute("1", {})).error).toMatch(/Mail store is not configured/);
+    expect(request).not.toHaveBeenCalled();
+  });
+});

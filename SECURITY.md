@@ -39,6 +39,6 @@ and encoded as a single Graph path segment.
 
 Outlook attachment saving is off until an operator configures an existing
 absolute directory. Keep that directory and its ancestors under operator
-control and use a different directory for each account. The tool creates files
-exclusively with owner-only permissions where supported. Existing files and
+control and use a different directory for each account. The tool stages each attachment privately, then publishes the complete file
+under a new name with owner-only permissions where supported. Existing files and
 symlinks at the destination name are skipped.

@@ -1001,7 +1001,7 @@ export async function saveAttachments(
   config: OutlookMailConfig,
   params: { message_id: string; output_dir?: string; content_types?: string[] },
 ): Promise<unknown> {
-  const { lstat, realpath, writeFile } = await import("node:fs/promises");
+  const { link, lstat, mkdtemp, realpath, rm, rmdir, unlink, writeFile } = await import("node:fs/promises");
   const { isAbsolute, join, resolve, win32 } = await import("node:path");
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
@@ -1028,23 +1028,34 @@ export async function saveAttachments(
   const attData = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}/attachments`) as { value: Array<Record<string, unknown>> };
   const saved: string[] = [];
   const skippedExisting: string[] = [];
-  for (const att of attData.value ?? []) {
-    const ct = String(att.contentType ?? "");
-    const matches = filters.some(f => f.endsWith("/*") ? ct.startsWith(f.slice(0, -1)) : ct === f);
-    if (!matches || typeof att.contentBytes !== "string") continue;
-    const basename = win32.basename(String(att.name ?? "attachment"));
-    const sanitized = basename.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "");
-    const name = sanitized && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized)
-      ? sanitized
-      : "attachment";
-    const file = join(destination, name);
-    try {
-      await writeFile(file, Buffer.from(att.contentBytes, "base64"), { flag: "wx", mode: 0o600 });
-      saved.push(file);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      skippedExisting.push(name);
+  const staging = await mkdtemp(join(destination, ".m365-attachments-"));
+  const stagedFile = join(staging, "attachment");
+  try {
+    for (const att of attData.value ?? []) {
+      const ct = String(att.contentType ?? "");
+      const matches = filters.some(f => f.endsWith("/*") ? ct.startsWith(f.slice(0, -1)) : ct === f);
+      if (!matches || typeof att.contentBytes !== "string") continue;
+      const basename = win32.basename(String(att.name ?? "attachment"));
+      const sanitized = basename.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "");
+      const name = sanitized && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized)
+        ? sanitized
+        : "attachment";
+      const file = join(destination, name);
+      // Stage the complete file before exposing its name. link() creates the
+      // destination atomically and fails if anything already occupies it.
+      await writeFile(stagedFile, Buffer.from(att.contentBytes, "base64"), { flag: "wx", mode: 0o600 });
+      try {
+        await link(stagedFile, file);
+        saved.push(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        skippedExisting.push(name);
+      }
+      await unlink(stagedFile);
     }
+  } finally {
+    await rm(stagedFile, { force: true });
+    await rmdir(staging);
   }
   return { saved, count: saved.length, skipped_existing: skippedExisting };
 }

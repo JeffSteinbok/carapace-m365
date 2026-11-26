@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import https from "node:https";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Calendar access control: tools are registered as factories and receive the
@@ -329,5 +329,6 @@ describe("Outlook attachment storage", () => {
     expect(readFileSync(resolve(directory, "existing.png"), "utf8")).toBe("existing");
     expect(readFileSync(resolve(scratch, "target.png"), "utf8")).toBe("target");
     expect(readFileSync(resolve(directory, "fresh.png"), "utf8")).toBe("new attachment");
+    expect(readdirSync(directory).sort()).toEqual(["existing.png", "fresh.png", "linked.png"]);
   });
 });

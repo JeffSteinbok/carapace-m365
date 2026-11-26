@@ -297,7 +297,6 @@ const server = http.createServer(async (req, res) => {
     }
     console.log("\nRefresh token acquired. Store it in the webhook service state or environment:\n");
     console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
-    console.log(`M365_REFRESH_TOKEN=${tokens.refresh_token}`);
     console.log(`M365_FEATURES=${inferred.features.join(",")}`);
     console.log("\nUse the same features in the plugin config:\n");
     console.log(JSON.stringify({ features: inferred.features }, null, 2));

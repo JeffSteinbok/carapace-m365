@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import https from "node:https";
 import { EventEmitter } from "node:events";
-import { rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Calendar access control: tools are registered as factories and receive the
@@ -99,8 +99,8 @@ describe("without an access block", () => {
 
   it("does not look up the event calendar before update/delete", async () => {
     const spy = mockHttpsSeq([TOKEN, 200], ["", 204]);
-    const { tools } = await loadPlugin({});
-    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt1" }));
+    const { tools } = await loadPlugin({ allowCalendarDeletion: true });
+    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt1", confirm_event_id: "evt1" }));
     expect(data.success).toBe(true);
     expect(spy.mock.calls.map((c) => String(c[0]))).not.toContainEqual(expect.stringContaining("/calendar?"));
   });
@@ -187,8 +187,8 @@ describe("writes", () => {
 
   it("update/delete look up the event's calendar and deny personal events for other agents", async () => {
     const spy = mockHttpsSeq([TOKEN, 200], [JSON.stringify({ id: "cal-1", name: "Calendar" }), 200], [CALENDARS, 200]);
-    const { tools } = await loadPlugin({ access: ACCESS });
-    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt1" }));
+    const { tools } = await loadPlugin({ access: ACCESS, allowCalendarDeletion: true });
+    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt1", confirm_event_id: "evt1" }));
     expect(data.error).toBe('Access denied: agent "family" (no sender) may not write calendar "personal"');
     expect(String(spy.mock.calls[1][0])).toContain("/me/events/evt1/calendar?$select=id,name");
     // No DELETE was issued.
@@ -197,8 +197,8 @@ describe("writes", () => {
 
   it("update/delete allow family events", async () => {
     mockHttpsSeq([TOKEN, 200], [JSON.stringify({ id: "fam-1", name: "Your Family" }), 200], [CALENDARS, 200], ["", 204]);
-    const { tools } = await loadPlugin({ access: ACCESS });
-    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt2" }));
+    const { tools } = await loadPlugin({ access: ACCESS, allowCalendarDeletion: true });
+    const data = text(await tools.outlook_delete_event(family).execute("id", { event_id: "evt2", confirm_event_id: "evt2" }));
     expect(data.success).toBe(true);
   });
 
@@ -248,5 +248,122 @@ describe("mapped broker accounts", () => {
     expect(text(await tools.outlook_inbox!({ agentId: "unmapped" }).execute("1", {})).error).toMatch(/no Microsoft 365 account assignment/);
     expect(text(await tools.outlook_search_store!({ agentId: "main" }).execute("1", {})).error).toMatch(/Mail store is not configured/);
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("calendar deletion safeguards", () => {
+  const args = { event_id: "evt1", confirm_event_id: "evt1" };
+
+  it("requires account opt-in before contacting Graph", async () => {
+    const spy = mockHttpsSeq();
+    const { tools } = await loadPlugin({});
+    const result = text(await tools.outlook_delete_event(family).execute("id", args));
+    expect(result.error).toContain("disabled for this account");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("parses the standalone CLI's explicit true opt-in", async () => {
+    const spy = mockHttpsSeq([TOKEN, 200], ["", 204]);
+    const disabled = await loadPlugin({ allowCalendarDeletion: "false" });
+    const denied = text(await disabled.tools.outlook_delete_event(family).execute("id", args));
+    expect(denied.error).toContain("disabled for this account");
+    expect(spy).not.toHaveBeenCalled();
+
+    const enabled = await loadPlugin({ allowCalendarDeletion: "true" });
+    const result = text(await enabled.tools.outlook_delete_event(family).execute("id", args));
+    expect(result.success).toBe(true);
+  });
+
+  it("requires the exact confirmation and a single event ID", async () => {
+    const spy = mockHttpsSeq();
+    const { tools } = await loadPlugin({ allowCalendarDeletion: true });
+    const mismatch = text(await tools.outlook_delete_event(family).execute("id", {
+      ...args,
+      confirm_event_id: "evt2",
+    }));
+    expect(mismatch.error).toContain("Confirm the target");
+    const invalid = text(await tools.outlook_delete_event(family).execute("id", {
+      event_id: "invalid event id",
+      confirm_event_id: "invalid event id",
+    }));
+    expect(invalid.error).toContain("single Microsoft Graph event ID");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("also applies the opt-in to cancellation via update", async () => {
+    const spy = mockHttpsSeq();
+    const { tools } = await loadPlugin({});
+    const result = text(await tools.outlook_update_event(family).execute("id", {
+      ...args,
+      status: "cancelled",
+    }));
+    expect(result.error).toContain("disabled for this account");
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Outlook attachment storage", () => {
+  const directory = resolve(scratch, "attachments");
+
+  it("requires configuration and refuses a caller-chosen destination", async () => {
+    const spy = mockHttpsSeq();
+    const unconfigured = await loadPlugin({});
+    const missing = text(await unconfigured.tools.outlook_save_attachments(family).execute("id", {
+      message_id: "msg1",
+    }));
+    expect(missing.error).toContain("Set attachmentSaveDirectory");
+
+    const configured = await loadPlugin({ attachmentSaveDirectory: directory });
+    const outside = text(await configured.tools.outlook_save_attachments(family).execute("id", {
+      message_id: "msg1",
+      output_dir: scratch,
+    }));
+    expect(outside.error).toContain("output_dir must match");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  function attachmentResponse(names: string[]) {
+    return JSON.stringify({ value: names.map(name => ({
+      name,
+      contentType: "image/png",
+      contentBytes: Buffer.from("new attachment").toString("base64"),
+    })) });
+  }
+
+  it("saves new files without overwriting existing files", async () => {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(resolve(directory, "existing.png"), "existing");
+    mockHttpsSeq([TOKEN, 200], [attachmentResponse(["existing.png", "fresh.png"]), 200]);
+    const { tools } = await loadPlugin({ attachmentSaveDirectory: directory });
+    const result = text(await tools.outlook_save_attachments(family).execute("id", { message_id: "msg1" }));
+
+    expect(result.count).toBe(1);
+    expect(result.skipped_existing).toEqual(["existing.png"]);
+    expect(readFileSync(resolve(directory, "existing.png"), "utf8")).toBe("existing");
+    expect(readFileSync(resolve(directory, "fresh.png"), "utf8")).toBe("new attachment");
+    expect(readdirSync(directory).sort()).toEqual(["existing.png", "fresh.png"]);
+  });
+
+  it("skips a destination symlink without writing to its target", async (ctx) => {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const target = resolve(scratch, "target.png");
+    writeFileSync(target, "target");
+    try {
+      symlinkSync(target, resolve(directory, "linked.png"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "ENOSYS" || code === "ENOTSUP") {
+        ctx.skip("The test filesystem does not permit creating symlinks");
+        return;
+      }
+      throw error;
+    }
+    mockHttpsSeq([TOKEN, 200], [attachmentResponse(["linked.png"]), 200]);
+    const { tools } = await loadPlugin({ attachmentSaveDirectory: directory });
+    const result = text(await tools.outlook_save_attachments(family).execute("id", { message_id: "msg1" }));
+
+    expect(result.count).toBe(0);
+    expect(result.skipped_existing).toEqual(["linked.png"]);
+    expect(readFileSync(target, "utf8")).toBe("target");
   });
 });

@@ -275,6 +275,28 @@ confidential clients, see
 | `familyCalendarNames` | `M365_FAMILY_CALENDAR_NAMES` | Extra comma-separated family calendar names |
 | `access` | — | Optional per-calendar read/write access control (see below) |
 
+### Calendar deletion and attachment storage
+
+OpenClaw requests capability consent at install. Microsoft Graph delegated
+permissions and the plugin's [feature settings](#least-privilege-permissions)
+control which account operations are available.
+
+- Calendar event deletion and cancellation are off by default. Set
+  `allowCalendarDeletion: true` for the assigned account only if it needs
+  those operations. The tool requires one Graph event ID, the same ID as
+  `confirm_event_id` to check the intended target, and calendar write access
+  when an ACL is configured. Obtain explicit user confirmation before calling
+  the tool. Deleting an organizer's event may notify attendees.
+- To let an account save Outlook attachments locally, set
+  `attachmentSaveDirectory` to an existing private absolute directory
+  controlled by the gateway operator, on a filesystem that supports hard
+  links. Use a distinct directory for each account. On Unix, set mode `0700`
+  to keep attachment names and contents private. The tool saves new files only and reports existing
+  names it skipped. Omit `output_dir` or pass that same configured directory.
+
+Set these options on the plugin config for the default account or in the
+corresponding `accounts.<account-id>` entry for a mapped account.
+
 ### Calendar access control
 
 Add an `access` block to restrict which agents and verified senders can read
@@ -319,7 +341,7 @@ How each tool is checked:
 | `outlook_query_events` | read on `calendar` (`personal` when omitted), in every mode: date range, text, `uid`. An explicit `calendar` now scopes `uid` and text queries to that calendar |
 | `outlook_create_event` | write on `calendar` (default `personal`) |
 | `outlook_meeting` | write on `personal` |
-| `outlook_update_event`, `outlook_delete_event` | The event's calendar is looked up first (`GET /me/events/{id}/calendar`), then write is required on it. Events on any other calendar are checked as `other:<name>` and are denied unless granted. The lookup only runs when `access.calendars` is set |
+| `outlook_update_event`, `outlook_delete_event` | Deletion and cancellation additionally require the safeguards above. The event's calendar is looked up first (`GET /me/events/{id}/calendar`), then write is required on it. Events on any other calendar are checked as `other:<name>` and are denied unless granted. The lookup only runs when `access.calendars` is set |
 
 A denial is returned as a tool error, for example
 `Access denied: agent "family" / sender +14255550100 may not read calendar "personal"`.

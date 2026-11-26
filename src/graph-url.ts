@@ -1,5 +1,12 @@
 export const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
+export function calendarEventPath(eventId: string): string {
+  if (typeof eventId !== "string" || !/^[A-Za-z0-9_+=-]+$/.test(eventId)) {
+    throw new Error("A single Microsoft Graph event ID is required");
+  }
+  return `/me/events/${encodeURIComponent(eventId)}`;
+}
+
 function graphContinuationUrl(next: string, errorMessage: string): URL {
   let url: URL;
   try {

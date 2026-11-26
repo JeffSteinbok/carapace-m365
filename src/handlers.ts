@@ -13,7 +13,7 @@ import {
   type GraphTokenManagerOptions,
 } from "@carapace/m365-graph-auth";
 import { DirectTokenStateStore } from "./direct-token-state.js";
-import { calendarContinuationPath, GRAPH_BASE } from "./graph-url.js";
+import { calendarContinuationPath, calendarEventPath, GRAPH_BASE } from "./graph-url.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,6 +29,7 @@ export interface OutlookCalendarConfig {
   directTokenStatePath: string;
   features: string[];
   oneDriveDeniedPaths?: string[];
+  attachmentSaveDirectory?: string;
   personalCalendarNames: string[];
   familyCalendarNames: string[];
   maskPrivateFamilyEvents?: boolean;
@@ -568,7 +569,7 @@ export async function updateEvent(
 ): Promise<unknown> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
-  if (!params.event_id) return { error: "event_id is required" };
+  const eventPath = calendarEventPath(params.event_id);
 
   const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
   const patch: Record<string, unknown> = {};
@@ -614,7 +615,7 @@ export async function updateEvent(
         // correction below would not fire, shifting the event a day later.
         const cur = await graphGet(
           token,
-          `/me/events/${params.event_id}?$select=start,end`,
+          `${eventPath}?$select=start,end`,
           { Prefer: `outlook.timezone="${QUERY_TIMEZONE}"` },
         ) as Record<string, unknown>;
         const curStartIso = String((cur.start as Record<string, string> | undefined)?.dateTime ?? "");
@@ -637,7 +638,7 @@ export async function updateEvent(
 
   // Attendee merge: fetch current, diff, patch full list
   if (params.add_attendees?.length || params.remove_attendees?.length) {
-    const evData = await graphGet(token, `/me/events/${params.event_id}?$select=attendees`) as Record<string, unknown>;
+    const evData = await graphGet(token, `${eventPath}?$select=attendees`) as Record<string, unknown>;
     const current = ((evData.attendees ?? []) as Array<Record<string, unknown>>).map(a => {
       const ea = (a.emailAddress as Record<string, string> | undefined) ?? {};
       return { email: (ea.address ?? "").toLowerCase(), type: String(a.type ?? "required") };
@@ -658,7 +659,7 @@ export async function updateEvent(
     return { error: "No fields to update were provided" };
   }
 
-  const res = await httpRequest("PATCH", `${GRAPH_BASE}/me/events/${params.event_id}`, token, JSON.stringify(patch));
+  const res = await httpRequest("PATCH", `${GRAPH_BASE}${eventPath}`, token, JSON.stringify(patch));
   if (res.status < 200 || res.status >= 300) {
     const err = JSON.parse(res.data ?? "{}");
     return { error: `Graph API error ${res.status}: ${err?.error?.message ?? res.data}` };
@@ -687,10 +688,10 @@ export async function resolveEventCalendar(
 ): Promise<{ key?: string; name?: string; error?: string; privateSharedEvent?: boolean }> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
-  if (!eventId) return { error: "event_id is required" };
+  const eventPath = calendarEventPath(eventId);
   // Same scope as the write that follows, so no extra consent is needed.
   const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
-  const cal = await graphGet(token, `/me/events/${eventId}/calendar?$select=id,name`) as {
+  const cal = await graphGet(token, `${eventPath}/calendar?$select=id,name`) as {
     id?: string; name?: string; error?: { message?: string };
   };
   if (!cal?.id) return { error: cal?.error?.message ?? "event or its calendar was not found" };
@@ -703,7 +704,7 @@ export async function resolveEventCalendar(
     const resolvedId = names.map(n => calMap[n]).find(Boolean);
     if (resolvedId ? resolvedId === cal.id : names.includes(name)) {
       if (key !== "family" || !config.maskPrivateFamilyEvents) return { key, name: cal.name };
-      const event = await graphGet(token, `/me/events/${encodeURIComponent(eventId)}?$select=sensitivity`) as {
+      const event = await graphGet(token, `${eventPath}?$select=sensitivity`) as {
         sensitivity?: string;
       };
       return { key, name: cal.name, privateSharedEvent: !shareableSensitivity(event?.sensitivity) };
@@ -722,10 +723,10 @@ export async function deleteEvent(
 ): Promise<unknown> {
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
-  if (!params.event_id) return { error: "event_id is required" };
+  const eventPath = calendarEventPath(params.event_id);
 
   const token = await getGraphAccessToken(config, SCOPES.calendarWrite);
-  const res = await httpRequest("DELETE", `${GRAPH_BASE}/me/events/${params.event_id}`, token);
+  const res = await httpRequest("DELETE", `${GRAPH_BASE}${eventPath}`, token);
   if (res.status === 204) return { success: true, event_id: params.event_id };
   if (res.status < 200 || res.status >= 300) {
     const err = (() => { try { return JSON.parse(res.data ?? "{}"); } catch { return {}; } })();
@@ -998,33 +999,85 @@ export async function readMessage(
 
 export async function saveAttachments(
   config: OutlookMailConfig,
-  params: { message_id: string; output_dir: string; content_types?: string[] },
+  params: { message_id: string; output_dir?: string; content_types?: string[] },
 ): Promise<unknown> {
-  const { default: fs } = await import("node:fs");
-  const { default: path } = await import("node:path");
+  const { link, lstat, mkdtemp, realpath, rm, rmdir, stat, unlink, writeFile } = await import("node:fs/promises");
+  const { basename, isAbsolute, join } = await import("node:path");
   const msgId = params.message_id?.trim();
-  const outputDir = params.output_dir?.trim();
   if (!msgId) return { error: "message_id is required" };
-  if (!outputDir) return { error: "output_dir is required" };
+  const configuredDir = config.attachmentSaveDirectory;
+  if (!configuredDir || !isAbsolute(configuredDir)) {
+    return { error: "Set attachmentSaveDirectory to a dedicated absolute directory before saving attachments" };
+  }
+  if (params.output_dir !== undefined && params.output_dir !== configuredDir) {
+    return { error: "output_dir must match attachmentSaveDirectory" };
+  }
+  const destination = await realpath(configuredDir);
+  const directoryStat = await stat(destination);
+  if (!directoryStat.isDirectory()) {
+    return { error: "attachmentSaveDirectory must resolve to an existing directory" };
+  }
+  if (process.platform !== "win32" && (directoryStat.mode & 0o077) !== 0) {
+    return { error: "attachmentSaveDirectory must be private on Unix (for example, mode 0700)" };
+  }
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
   const token = await getGraphAccessToken(config, SCOPES.mailRead);
   const filters = params.content_types ?? ["image/*"];
-  fs.mkdirSync(outputDir, { recursive: true });
   const attData = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}/attachments`) as { value: Array<Record<string, unknown>> };
   const saved: string[] = [];
-  for (const att of attData.value ?? []) {
-    const ct = String(att.contentType ?? "");
-    const matches = filters.some(f => { if (f.endsWith("/*")) return ct.startsWith(f.slice(0, -1)); return ct === f; });
-    if (!matches) continue;
-    const name = String(att.name ?? "attachment");
-    const safe = path.basename(name).replace(/[/\\]/g, "_") || "attachment";
-    const dest = path.join(outputDir, safe);
-    const content = String(att.contentBytes ?? "");
-    fs.writeFileSync(dest, Buffer.from(content, "base64"));
-    saved.push(dest);
+  const skippedExisting: string[] = [];
+  let staging: string | undefined;
+  try {
+    for (const att of attData.value ?? []) {
+      const ct = String(att.contentType ?? "");
+      const matches = filters.some(f => f.endsWith("/*") ? ct.startsWith(f.slice(0, -1)) : ct === f);
+      if (!matches || typeof att.contentBytes !== "string") continue;
+      const originalName = String(att.name ?? "");
+      const leaf = basename(originalName);
+      const reservedOnWindows = process.platform === "win32" && (
+        /[<>:"|?*\x00-\x1f]|[. ]$/.test(leaf) ||
+        /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(leaf)
+      );
+      const name = leaf && leaf !== "." && leaf !== ".." && !leaf.includes("\0") && !reservedOnWindows
+        ? leaf
+        : `attachment-${createHash("sha256").update(originalName).digest("hex").slice(0, 12)}`;
+      const file = join(destination, name);
+      const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      if (existing) {
+        skippedExisting.push(name);
+        continue;
+      }
+
+      // Stage the complete file before exposing its name. link() creates the
+      // destination atomically and fails if anything already occupies it.
+      staging ??= await mkdtemp(join(destination, ".m365-attachments-"));
+      const stagedFile = join(staging, "attachment");
+      await writeFile(stagedFile, Buffer.from(att.contentBytes, "base64"), { flag: "wx", mode: 0o600 });
+      try {
+        await link(stagedFile, file);
+        saved.push(file);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EEXIST") {
+          skippedExisting.push(name);
+        } else if (code && ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EPERM"].includes(code)) {
+          throw new Error("attachmentSaveDirectory must allow hard links. Choose a supported local filesystem or check its permissions.");
+        } else {
+          throw error;
+        }
+      }
+      await unlink(stagedFile);
+    }
+  } finally {
+    if (staging) {
+      await rm(join(staging, "attachment"), { force: true });
+      await rmdir(staging);
+    }
   }
-  return { saved, count: saved.length };
+  return { saved, count: saved.length, skipped_existing: skippedExisting };
 }
 
 // ---------------------------------------------------------------------------

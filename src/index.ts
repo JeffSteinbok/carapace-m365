@@ -62,6 +62,7 @@ import {
   readOneDriveFile,
   uploadOneDriveFile,
 } from "./onedrive.js";
+import { calendarEventPath } from "./graph-url.js";
 import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
 
 /**
@@ -73,7 +74,17 @@ import { DEFAULT_DIRECT_TOKEN_STATE_PATH } from "./direct-token-state.js";
  */
 export const DEFAULT_CLIENT_ID = "0c3df71b-4dc2-49a7-b6e7-e5c3c48bf501";
 
+const destructiveOperationConfig = {
+  allowCalendarDeletion: Type.Optional(Type.Boolean({
+    description: "Allow this account to delete or cancel calendar events. Defaults to false.",
+  })),
+  attachmentSaveDirectory: Type.Optional(Type.String({
+    description: "Existing private absolute directory where this account may save new Outlook attachment files.",
+  })),
+};
+
 const accountSchema = Type.Object({
+  ...destructiveOperationConfig,
   agents: Type.Array(Type.String(), { minItems: 1 }),
   tokenBrokerUrl: Type.String({ minLength: 1 }),
   tokenBrokerSecret: Type.String({ minLength: 1 }),
@@ -90,6 +101,7 @@ const createBaseEntry = definePlugin({
   description: packageJson.description,
 
   configSchema: Type.Object({
+    ...destructiveOperationConfig,
     accounts: Type.Optional(Type.Record(Type.String(), accountSchema)),
     defaultAgents: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })),
     clientId: Type.Optional(Type.String({ description: "Microsoft OAuth client ID" })),
@@ -184,10 +196,10 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_save_attachments",
       label: "Outlook Save Attachments",
-      description: "Download attachments from an Outlook message to a local directory.",
+      description: "Save Outlook attachments as new files in this account's configured directory.",
       parameters: Type.Object({
         message_id: Type.String({ description: "The Microsoft Graph message ID." }),
-        output_dir: Type.String({ description: "Local directory path to save attachments to (created if needed)." }),
+        output_dir: Type.Optional(Type.String({ description: "If supplied, must match the configured attachment save directory." })),
         content_types: Type.Optional(Type.Array(Type.String(), { description: "Content type filters (e.g. ['image/*']). Defaults to ['image/*']." })),
       }),
       async execute({ message_id, output_dir, content_types }, config) {
@@ -582,9 +594,12 @@ const createBaseEntry = definePlugin({
         status: Type.Optional(Type.Union([Type.Literal("confirmed"), Type.Literal("tentative"), Type.Literal("cancelled")], { description: "Update event status. Note: 'cancelled' also cancels the event — use show_as to change free/busy only." })),
         is_all_day: Type.Optional(Type.Boolean({ description: "Convert to/from an all-day event. When true, start/end snap to whole days (end inclusive) and free/busy defaults to free." })),
         show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
+        confirm_event_id: Type.Optional(Type.String({ description: "For cancellation, repeat the exact event ID to confirm the target. Ask the user first." })),
       }),
       async execute(params, config, ctx) {
         try {
+          calendarEventPath(params.event_id);
+          if (params.status === "cancelled") requireCalendarDeletion(config, params);
           const denied = await eventWriteDenied(config, params.event_id, ctx);
           if (denied) return denied;
           return await updateEvent(resolveConfig(config), params);
@@ -597,12 +612,15 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_delete_event",
       label: "Outlook Delete Event",
-      description: "Delete (cancel) an Outlook calendar event by event ID.",
+      description: "Delete one Outlook event. Requires account opt-in and a matching target confirmation; ask the user first.",
       parameters: Type.Object({
         event_id: Type.String({ description: "Graph event ID to delete. Get this from outlook_calendar_fetch." }),
+        confirm_event_id: Type.String({ description: "Repeat the exact event ID to confirm the target. Ask the user before deleting." }),
       }),
       async execute(params, config, ctx) {
         try {
+          calendarEventPath(params.event_id);
+          requireCalendarDeletion(config, params);
           const denied = await eventWriteDenied(config, params.event_id, ctx);
           if (denied) return denied;
           return await deleteEvent(resolveConfig(config), params);
@@ -1007,6 +1025,18 @@ export function createEntry(): PluginEntry {
 // Calendar access control
 // ---------------------------------------------------------------------------
 
+function requireCalendarDeletion(
+  config: { allowCalendarDeletion?: boolean | string },
+  params: { event_id: string; confirm_event_id?: string },
+): void {
+  if (config.allowCalendarDeletion !== true && config.allowCalendarDeletion !== "true") {
+    throw new Error("Calendar deletion and cancellation are disabled for this account");
+  }
+  if (params.confirm_event_id !== params.event_id) {
+    throw new Error("Confirm the target by matching event_id in confirm_event_id");
+  }
+}
+
 /** ACL resource kind for calendars (`config.access.calendars`). */
 const CALENDARS = "calendars";
 /** Calendar ids, as used by the tools' `calendar` parameter and the ACL. */
@@ -1058,6 +1088,7 @@ export function resolveConfig(config: {
   tokenBrokerSecret?: string;
   features?: string[];
   oneDriveDeniedPaths?: string[];
+  attachmentSaveDirectory?: string;
   personalCalendarNames?: string[];
   familyCalendarNames?: string[];
   maskPrivateFamilyEvents?: boolean;
@@ -1084,6 +1115,7 @@ export function resolveConfig(config: {
     tokenBrokerSecret: brokerSecret,
     features: configuredFeatures(config),
     oneDriveDeniedPaths: config.oneDriveDeniedPaths,
+    attachmentSaveDirectory: config.attachmentSaveDirectory,
     maskPrivateFamilyEvents: config.maskPrivateFamilyEvents,
     personalCalendarNames: parseNames(
       config.personalCalendarNames,

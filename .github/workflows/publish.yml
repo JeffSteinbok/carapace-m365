@@ -34,9 +34,9 @@ jobs:
           test "$RELEASE_TAG" = "v$version"
           channel=latest
           case "$version" in
-            *-alpha.*) channel=alpha ;;
-            *-beta.*) channel=beta ;;
-            *-rc.*) channel=rc ;;
+            *-alpha|*-alpha.*) channel=alpha ;;
+            *-beta|*-beta.*) channel=beta ;;
+            *-rc|*-rc.*) channel=rc ;;
             *-*) echo "Unsupported prerelease channel" >&2; exit 1 ;;
           esac
           npm publish --access public --tag "$channel"

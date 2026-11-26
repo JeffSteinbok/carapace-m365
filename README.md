@@ -29,7 +29,35 @@ single-process use.
 
 ## Quick start
 
-### 1. Consent only to the features you want
+### 1. Register an app and sign in
+
+In Microsoft Entra ID, create an app registration. Choose personal Microsoft
+accounts, work/school accounts, or both as the supported account types. Use
+`consumers` for personal accounts, your tenant ID for a single work/school
+tenant, `organizations` for work/school accounts across tenants, or `common`
+for an app that accepts both. Copy the application (client) ID. Under
+**Authentication**, enable **Allow public client flows**. For browser sign-in
+with PKCE, also add `http://localhost` under **Mobile and desktop applications**.
+
+Under **API permissions**, select Microsoft Graph **Delegated permissions**
+for the features you intend to use. For example, add `Mail.Read` for reading
+mail. Work/school customers may need an administrator to grant consent.
+See the [app registration guide](https://github.com/JeffSteinbok/carapace-m365/blob/main/docs/custom-app-registration.md)
+for the scope mappings.
+
+Clone this repository to run the login script and broker service:
+
+```sh
+git clone https://github.com/JeffSteinbok/carapace-m365.git
+cd carapace-m365
+npm run login -- --client-id YOUR_CLIENT_ID --tenant consumers --device-code --token-file ./m365-refresh-token.private
+```
+
+Open Microsoft's verification address shown by the script
+([microsoft.com/link](https://www.microsoft.com/link) for personal accounts), enter
+the displayed code, and sign in to the intended account. Use a new token file
+for each login. Keep it private and outside version control. For browser
+sign-in, omit `--device-code` and retain `--token-file`. See [security notes](SECURITY.md).
 
 The default grants the core capabilities:
 `calendar-write,mail-write,mail-send,tasks-write`. It does **not** add OneDrive,
@@ -37,10 +65,10 @@ and OneDrive tools are not registered unless `onedrive-read` or
 `onedrive-write` is explicitly enabled.
 
 ```powershell
-npm run login
+npm run login -- --client-id YOUR_CLIENT_ID --tenant consumers --token-file ./m365-refresh-token.private
 ```
 
-Use `--features` for least-privilege or incremental consent:
+Keep the client, tenant, and token-file flags from the command above. The snippets below show feature and scope options:
 
 ```powershell
 # Read-only OneDrive
@@ -81,6 +109,7 @@ Set at least:
 
 ```text
 M365_CLIENT_ID=your-app-client-id
+M365_TENANT=consumers
 M365_REFRESH_TOKEN=the-token-from-login
 M365_FEATURES=calendar-write,mail-write,mail-send,tasks-write
 M365_TOKEN_BROKER_SECRET=a-long-random-secret
@@ -88,6 +117,9 @@ M365_WEBHOOK_URL=https://your-public-host/m365/webhook
 M365_WEBHOOK_CLIENT_STATE=another-long-random-secret
 NOTIFY_TARGET=your-openclaw-notification-target
 ```
+
+Set `M365_TENANT` to the tenant used during sign-in. Read the value for
+`M365_REFRESH_TOKEN` from the private token file into the service environment.
 
 Then start:
 
@@ -97,10 +129,16 @@ node services/m365-webhook/dist/index.js
 
 The service binds to `127.0.0.1:18790` by default, exposes authenticated
 `POST /token`, and accepts Graph notifications at `/m365/webhook`. See
-[services/m365-webhook/README.md](services/m365-webhook/README.md) for proxy,
+[webhook service guide](https://github.com/JeffSteinbok/carapace-m365/blob/main/services/m365-webhook/README.md) for proxy,
 state, deployment, and systemd details.
 
-### 3. Configure the plugin
+### 3. Install and configure the plugin
+
+```sh
+openclaw plugins install clawhub:carapace-m365
+```
+
+For more than one mailbox or identity, see [Multiple broker accounts](#multiple-broker-accounts).
 
 ```json
 {
@@ -469,3 +507,22 @@ For remote sign-in, use `npm run login -- --device-code --token-file <new-privat
 with the account's scopes. Enable public client flows in the app registration
 first. The command shows the verification code and saves the refresh token to
 the new file with private permissions.
+
+For example, include this mapping in `plugins.entries.m365.config` for an
+additional read-only mailbox called `shared` in the broker account file:
+
+```json
+{
+  "accounts": {
+    "shared": {
+      "agents": ["shared-assistant"],
+      "tokenBrokerUrl": "http://127.0.0.1:18790/token/shared",
+      "tokenBrokerSecret": "${M365_SHARED_BROKER_SECRET}",
+      "features": ["mail-read"]
+    }
+  }
+}
+```
+
+Use `M365_SHARED_BROKER_SECRET` as the service account's `brokerSecretEnv`
+and list `shared-assistant` in its `allowedAgents` if its rules route to that agent.

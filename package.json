@@ -13,7 +13,9 @@
   "files": [
     "dist",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "assets/icon.png",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "npm run typecheck && npm run build:auth && npm run build:plugin && npm run build:webhook",
@@ -37,7 +39,13 @@
   "openclaw": {
     "extensions": [
       "./dist/adapter.js"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.11.10"
+    },
+    "build": {
+      "openclawVersion": "2026.11.10"
+    }
   },
   "peerDependencies": {
     "openclaw": "^2026.4.23"
@@ -49,5 +57,9 @@
   },
   "dependencies": {
     "carapace-plugin-sdk": "^3.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JeffSteinbok/carapace-m365.git"
   }
 }

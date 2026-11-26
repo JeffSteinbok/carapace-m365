@@ -1,5 +1,6 @@
 {
   "name": "carapace-m365",
+  "description": "🐚📧📅✅📁 Microsoft 365 tools for Outlook mail, calendars, Microsoft To Do, and OneDrive through Microsoft Graph.",
   "version": "1.5.0",
   "type": "module",
   "main": "dist/plugin.js",
@@ -20,7 +21,8 @@
   "scripts": {
     "build": "npm run typecheck && npm run build:auth && npm run build:plugin && npm run build:webhook",
     "build:auth": "npm run build --workspace @carapace/m365-graph-auth",
-    "build:plugin": "tsup && carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin",
+    "build:plugin": "tsup && carapace-generate-cli --entry ./dist/plugin.js --out ./dist/bin && npm run check:manifest",
+    "check:manifest": "node -e \"require('node:assert/strict').strictEqual(require('./openclaw.plugin.json').version, require('./package.json').version)\"",
     "build:webhook": "npm run build --workspace @carapace/m365-webhook",
     "login": "node scripts/login.mjs",
     "test": "vitest run",

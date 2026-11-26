@@ -273,8 +273,8 @@ control which account operations are available.
 - To let an account save Outlook attachments locally, set
   `attachmentSaveDirectory` to an existing private absolute directory
   controlled by the gateway operator, on a filesystem that supports hard
-  links. Use a distinct directory for each account. On Unix, make it owner-writable and keep group and world write
-  permissions disabled. The tool saves new files only and reports existing
+  links. Use a distinct directory for each account. On Unix, set mode `0700`
+  to keep attachment names and contents private. The tool saves new files only and reports existing
   names it skipped. Omit `output_dir` or pass that same configured directory.
 
 Set these options on the plugin config for the default account or in the

@@ -1017,8 +1017,8 @@ export async function saveAttachments(
   if (!directoryStat.isDirectory()) {
     return { error: "attachmentSaveDirectory must resolve to an existing directory" };
   }
-  if (process.platform !== "win32" && (directoryStat.mode & 0o022) !== 0) {
-    return { error: "attachmentSaveDirectory must not be group- or world-writable" };
+  if (process.platform !== "win32" && (directoryStat.mode & 0o077) !== 0) {
+    return { error: "attachmentSaveDirectory must be private on Unix (for example, mode 0700)" };
   }
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };

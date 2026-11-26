@@ -29,3 +29,15 @@ account's rule routes with `allowedAgents`. Unassigned agents are refused once
 assignments are configured. Keep broker credentials, state files, and rules
 outside agent-accessible filesystems and shells. The gateway and broker
 operator retain access to the credentials for the accounts they manage.
+
+Calendar deletion or cancellation requires a per-account operator opt-in,
+the same event ID in the target and confirmation fields, and the existing
+calendar ACL check when configured. The confirmation field is a tool input.
+Ask the user to confirm the action before supplying it. Event IDs are validated
+and encoded as a single Graph path segment.
+
+Outlook attachment saving is off until an operator configures an existing
+absolute directory. Keep that directory and its ancestors under operator
+control and use a different directory for each account. The tool creates files
+exclusively with owner-only permissions where supported. Existing files and
+symlinks at the destination name are skipped.

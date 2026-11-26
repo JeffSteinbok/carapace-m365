@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release-tag:
-        description: Release tag already published to npm through this workflow (for example, v1.5.1)
+        description: Release tag already published to npm. Select the same tag as the workflow ref.
         required: true
         type: string
 
@@ -88,6 +88,11 @@ jobs:
             echo "Expected a stable release tag or an alpha, beta, or rc tag." >&2
             exit 1
           fi
+          ref="refs/tags/$RELEASE_TAG"
+          if [[ "$GITHUB_REF" != "$ref" ]]; then
+            echo "Dispatch this workflow from the same release tag supplied as release-tag." >&2
+            exit 1
+          fi
           version="${RELEASE_TAG#v}"
           channel=latest
           if [[ "$version" == *-* ]]; then
@@ -101,7 +106,6 @@ jobs:
           archive="$(npm pack "carapace-m365@$version" --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
           digest="$(sha512sum "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)"
           repository="https://github.com/$GITHUB_REPOSITORY"
-          ref="refs/tags/$RELEASE_TAG"
           bundle="$RUNNER_TEMP/carapace-m365-provenance.json"
           curl -fsSL "https://registry.npmjs.org/-/npm/v1/attestations/carapace-m365@$version" |
             jq -e '.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1") | .bundle' > "$bundle"
@@ -120,6 +124,6 @@ jobs:
           clawhub package publish "$RUNNER_TEMP/$archive" \
             --source-repo "$GITHUB_REPOSITORY" \
             --source-commit "$commit" \
-            --source-ref "$RELEASE_TAG" \
+            --source-ref "$ref" \
             --tags "$channel" \
             --wait

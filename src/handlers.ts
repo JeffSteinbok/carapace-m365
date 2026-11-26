@@ -1001,7 +1001,7 @@ export async function saveAttachments(
   config: OutlookMailConfig,
   params: { message_id: string; output_dir?: string; content_types?: string[] },
 ): Promise<unknown> {
-  const { link, lstat, mkdtemp, realpath, rm, rmdir, unlink, writeFile } = await import("node:fs/promises");
+  const { link, lstat, mkdtemp, realpath, rm, rmdir, stat, unlink, writeFile } = await import("node:fs/promises");
   const { isAbsolute, join, win32 } = await import("node:path");
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
@@ -1012,14 +1012,14 @@ export async function saveAttachments(
   if (params.output_dir !== undefined && params.output_dir.trim() !== configuredDir) {
     return { error: "output_dir must match attachmentSaveDirectory" };
   }
-  const directoryStat = await lstat(configuredDir);
+  const destination = await realpath(configuredDir);
+  const directoryStat = await stat(destination);
   if (!directoryStat.isDirectory()) {
-    return { error: "attachmentSaveDirectory must be an existing directory with no symlink at its final path" };
+    return { error: "attachmentSaveDirectory must resolve to an existing directory" };
   }
   if (process.platform !== "win32" && (directoryStat.mode & 0o022) !== 0) {
     return { error: "attachmentSaveDirectory must not be group- or world-writable" };
   }
-  const destination = await realpath(configuredDir);
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
   const token = await getGraphAccessToken(config, SCOPES.mailRead);

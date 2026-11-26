@@ -38,7 +38,7 @@ the user to confirm the action before invoking the tool. Event IDs are validated
 and encoded as a single Graph path segment.
 
 Outlook attachment saving is off until an operator configures an existing
-absolute directory. Keep that directory and its ancestors under operator
-control and use a different directory for each account. The tool stages each attachment privately, then publishes the complete file
+absolute directory. The tool pins its canonical path for each call. Keep
+that directory and its ancestors under operator control and use a different directory for each account. The tool stages each attachment privately, then publishes the complete file
 under a new name with owner-only permissions where supported. Existing files and
 symlinks at the destination name are skipped.

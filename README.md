@@ -8,6 +8,23 @@ through Microsoft Graph.
 The package is named `carapace-m365`. Outlook and OneDrive tool names remain
 brand-specific within the Microsoft 365 plugin.
 
+## Multiple accounts: one agent per family member
+
+Since 1.5.0, a single install can serve several Microsoft accounts, each mapped
+to its own OpenClaw agents. A household can give each person their own agent,
+connected only to that person's Outlook mail, calendar, To Do and OneDrive:
+
+- **Separate accounts:** each account has its own sign-in, refresh token, Graph
+  webhook subscription, mail rules and notification channel in the token broker.
+- **Strict mapping:** an agent mapped to an account uses only that account.
+  Once accounts are mapped, agents that aren't assigned to one are refused.
+- **Shared family calendars:** these can be shared across agents, with read and
+  write rules for each agent ([Calendar access control](#calendar-access-control)).
+  Private events on shared calendars are masked.
+
+Setup and an example config are in
+[Multiple broker accounts](#multiple-broker-accounts).
+
 ## Architecture
 
 The recommended deployment uses the standalone token broker included in this

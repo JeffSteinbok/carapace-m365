@@ -582,7 +582,6 @@ const createBaseEntry = definePlugin({
       description: "Update an existing Outlook calendar event by event ID. Get the event ID from outlook_calendar_fetch.",
       parameters: Type.Object({
         event_id: Type.String({ description: "Graph event ID from outlook_calendar_fetch." }),
-        confirm_event_id: Type.Optional(Type.String({ description: "For cancellation, repeat the exact event ID to confirm the target. Ask the user first." })),
         subject: Type.Optional(Type.String({ description: "New event title." })),
         start: Type.Optional(Type.String({ description: "New start datetime in ISO format." })),
         end: Type.Optional(Type.String({ description: "New end datetime in ISO format." })),
@@ -595,6 +594,7 @@ const createBaseEntry = definePlugin({
         status: Type.Optional(Type.Union([Type.Literal("confirmed"), Type.Literal("tentative"), Type.Literal("cancelled")], { description: "Update event status. Note: 'cancelled' also cancels the event — use show_as to change free/busy only." })),
         is_all_day: Type.Optional(Type.Boolean({ description: "Convert to/from an all-day event. When true, start/end snap to whole days (end inclusive) and free/busy defaults to free." })),
         show_as: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("tentative"), Type.Literal("busy"), Type.Literal("oof"), Type.Literal("workingElsewhere")], { description: "Free/busy status shown to others (default: busy, or free for all-day events)." })),
+        confirm_event_id: Type.Optional(Type.String({ description: "For cancellation, repeat the exact event ID to confirm the target. Ask the user first." })),
       }),
       async execute(params, config, ctx) {
         try {

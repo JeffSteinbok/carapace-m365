@@ -1027,8 +1027,7 @@ export async function saveAttachments(
   const attData = await graphGet(token, `/me/messages/${encodeURIComponent(msgId)}/attachments`) as { value: Array<Record<string, unknown>> };
   const saved: string[] = [];
   const skippedExisting: string[] = [];
-  const staging = await mkdtemp(join(destination, ".m365-attachments-"));
-  const stagedFile = join(staging, "attachment");
+  let staging: string | undefined;
   try {
     for (const att of attData.value ?? []) {
       const ct = String(att.contentType ?? "");
@@ -1054,6 +1053,8 @@ export async function saveAttachments(
 
       // Stage the complete file before exposing its name. link() creates the
       // destination atomically and fails if anything already occupies it.
+      staging ??= await mkdtemp(join(destination, ".m365-attachments-"));
+      const stagedFile = join(staging, "attachment");
       await writeFile(stagedFile, Buffer.from(att.contentBytes, "base64"), { flag: "wx", mode: 0o600 });
       try {
         await link(stagedFile, file);
@@ -1071,8 +1072,10 @@ export async function saveAttachments(
       await unlink(stagedFile);
     }
   } finally {
-    await rm(stagedFile, { force: true });
-    await rmdir(staging);
+    if (staging) {
+      await rm(join(staging, "attachment"), { force: true });
+      await rmdir(staging);
+    }
   }
   return { saved, count: saved.length, skipped_existing: skippedExisting };
 }

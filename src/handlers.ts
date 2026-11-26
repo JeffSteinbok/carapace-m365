@@ -1002,25 +1002,24 @@ export async function saveAttachments(
   params: { message_id: string; output_dir?: string; content_types?: string[] },
 ): Promise<unknown> {
   const { link, lstat, mkdtemp, realpath, rm, rmdir, unlink, writeFile } = await import("node:fs/promises");
-  const { isAbsolute, join, resolve, win32 } = await import("node:path");
+  const { isAbsolute, join, win32 } = await import("node:path");
   const msgId = params.message_id?.trim();
   if (!msgId) return { error: "message_id is required" };
   const configuredDir = config.attachmentSaveDirectory;
   if (!configuredDir || !isAbsolute(configuredDir)) {
     return { error: "Set attachmentSaveDirectory to a dedicated absolute directory before saving attachments" };
   }
-  if (params.output_dir !== undefined && resolve(params.output_dir) !== resolve(configuredDir)) {
+  if (params.output_dir !== undefined && params.output_dir.trim() !== configuredDir) {
     return { error: "output_dir must match attachmentSaveDirectory" };
   }
-  const directory = resolve(configuredDir);
-  const directoryStat = await lstat(directory);
+  const directoryStat = await lstat(configuredDir);
   if (!directoryStat.isDirectory()) {
     return { error: "attachmentSaveDirectory must be an existing directory with no symlink at its final path" };
   }
   if (process.platform !== "win32" && (directoryStat.mode & 0o022) !== 0) {
     return { error: "attachmentSaveDirectory must not be group- or world-writable" };
   }
-  const destination = await realpath(directory);
+  const destination = await realpath(configuredDir);
   const authError = getAuthConfigError(config);
   if (authError) return { error: authError };
   const token = await getGraphAccessToken(config, SCOPES.mailRead);
@@ -1041,6 +1040,14 @@ export async function saveAttachments(
         ? sanitized
         : "attachment";
       const file = join(destination, name);
+      const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      if (existing) {
+        skippedExisting.push(name);
+        continue;
+      }
+
       // Stage the complete file before exposing its name. link() creates the
       // destination atomically and fails if anything already occupies it.
       await writeFile(stagedFile, Buffer.from(att.contentBytes, "base64"), { flag: "wx", mode: 0o600 });

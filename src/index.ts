@@ -582,7 +582,7 @@ const createBaseEntry = definePlugin({
       description: "Update an existing Outlook calendar event by event ID. Get the event ID from outlook_calendar_fetch.",
       parameters: Type.Object({
         event_id: Type.String({ description: "Graph event ID from outlook_calendar_fetch." }),
-        confirm_event_id: Type.Optional(Type.String({ description: "Repeat the exact event ID after the user confirms cancellation." })),
+        confirm_event_id: Type.Optional(Type.String({ description: "For cancellation, repeat the exact event ID to confirm the target. Ask the user first." })),
         subject: Type.Optional(Type.String({ description: "New event title." })),
         start: Type.Optional(Type.String({ description: "New start datetime in ISO format." })),
         end: Type.Optional(Type.String({ description: "New end datetime in ISO format." })),
@@ -612,10 +612,10 @@ const createBaseEntry = definePlugin({
     tool({
       name: "outlook_delete_event",
       label: "Outlook Delete Event",
-      description: "Delete one Outlook event after confirming cancellation with the user. Requires account-level opt-in.",
+      description: "Delete one Outlook event. Requires account opt-in and a matching target confirmation; ask the user first.",
       parameters: Type.Object({
         event_id: Type.String({ description: "Graph event ID to delete. Get this from outlook_calendar_fetch." }),
-        confirm_event_id: Type.String({ description: "Repeat the exact event ID after the user confirms deletion or cancellation." }),
+        confirm_event_id: Type.String({ description: "Repeat the exact event ID to confirm the target. Ask the user before deleting." }),
       }),
       async execute(params, config, ctx) {
         try {
@@ -1033,7 +1033,7 @@ function requireCalendarDeletion(
     throw new Error("Calendar deletion and cancellation are disabled for this account");
   }
   if (params.confirm_event_id !== params.event_id) {
-    throw new Error("Confirm the exact event ID with confirm_event_id after the user approves");
+    throw new Error("Confirm the target by matching event_id in confirm_event_id");
   }
 }
 

@@ -269,7 +269,7 @@ describe("calendar deletion safeguards", () => {
       ...args,
       confirm_event_id: "evt2",
     }));
-    expect(mismatch.error).toContain("Confirm the exact event ID");
+    expect(mismatch.error).toContain("Confirm the target");
     const invalid = text(await tools.outlook_delete_event(family).execute("id", {
       event_id: "invalid event id",
       confirm_event_id: "invalid event id",

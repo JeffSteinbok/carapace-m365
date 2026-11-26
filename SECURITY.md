@@ -32,8 +32,9 @@ operator retain access to the credentials for the accounts they manage.
 
 Calendar deletion or cancellation requires a per-account operator opt-in,
 the same event ID in the target and confirmation fields, and the existing
-calendar ACL check when configured. The confirmation field is a tool input.
-Ask the user to confirm the action before supplying it. Event IDs are validated
+calendar ACL check when configured. The confirmation field checks the target
+selected by the caller. Per-call human approval requires a host policy. Ask
+the user to confirm the action before invoking the tool. Event IDs are validated
 and encoded as a single Graph path segment.
 
 Outlook attachment saving is off until an operator configures an existing

@@ -267,9 +267,9 @@ control which account operations are available.
 - Calendar event deletion and cancellation are off by default. Set
   `allowCalendarDeletion: true` for the assigned account only if it needs
   those operations. The tool requires one Graph event ID, the same ID as
-  `confirm_event_id` after explicit user confirmation, and calendar write
-  access when an ACL is configured. Deleting an organizer's event may notify
-  attendees.
+  `confirm_event_id` to check the intended target, and calendar write access
+  when an ACL is configured. Obtain explicit user confirmation before calling
+  the tool. Deleting an organizer's event may notify attendees.
 - To let an account save Outlook attachments locally, set
   `attachmentSaveDirectory` to an existing private absolute directory
   controlled by the gateway operator. Use a distinct directory for each
